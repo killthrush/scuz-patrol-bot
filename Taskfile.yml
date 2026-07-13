@@ -1,0 +1,51 @@
+version: "3"
+
+tasks:
+  "install-deps:backend":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - pip install --upgrade pip
+      - pip install -r requirements.txt
+    silent: false
+
+  "build:backend":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - mkdir -p build
+      - cp -r src/* build/
+      - pip install -r requirements.txt -t build/ --upgrade
+      - cd build && zip -r ../lambda_deployment.zip . && cd ..
+    silent: false
+
+  "build:infra:dev":
+    dir: "{{.USER_WORKING_DIR}}/terraform/envs/dev"
+    cmds:
+      - terraform init
+      - terraform plan -out=.current-plan
+    silent: false
+
+  "deploy:infra:dev":
+    dir: "{{.USER_WORKING_DIR}}/terraform/envs/dev"
+    cmds:
+      - terraform apply .current-plan
+    silent: false
+
+  "deploy:backend:dev":
+    dir: "{{.USER_WORKING_DIR}}"
+    cmds:
+      - aws lambda update-function-code --function-name {{.FUNCTION_NAME}} --zip-file fileb://lambda_deployment.zip
+    vars:
+      FUNCTION_NAME:
+        sh: task describe:infra:dev | jq -r '.lambda_function_name.value'
+    silent: false
+
+  "describe:infra:dev":
+    dir: "{{.USER_WORKING_DIR}}/terraform/envs/dev"
+    cmds:
+      - terraform output --json | jq -r '.'
+    silent: false
+
+  "clean":
+    cmds:
+      - rm -rf backend/build backend/lambda_deployment.zip
+    silent: false

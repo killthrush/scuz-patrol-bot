@@ -11,6 +11,8 @@ from typing import Any, Dict
 from dotenv import load_dotenv
 
 from discord_client import parse_discord_event, extract_message_from_event
+from claude_client import ClaudeClient
+from google_docs_client import GoogleDocsClient
 
 # Load .env for local testing (no-op in Lambda)
 load_dotenv()
@@ -54,17 +56,79 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         logger.info(f"User message: {message}")
 
-        # TODO: Call Claude to classify intent
-        # TODO: Handle response (answer question or write lore)
-        # TODO: Post response back to Discord
+        # Initialize clients
+        try:
+            claude = ClaudeClient()
+            docs = GoogleDocsClient()
+        except ValueError as e:
+            logger.error(f"Failed to initialize clients: {e}")
+            return {
+                "statusCode": 500,
+                "body": json.dumps({"error": "Service initialization failed"}),
+            }
+
+        # Fetch the current canon doc
+        try:
+            canon_doc = docs.read_document()
+        except Exception as e:
+            logger.error(f"Failed to read canon doc: {e}")
+            return {
+                "statusCode": 500,
+                "body": json.dumps({"error": "Failed to fetch canon"}),
+            }
+
+        # Classify the user's message intent
+        try:
+            classification = claude.classify_intent(message, canon_doc)
+        except Exception as e:
+            logger.error(f"Failed to classify intent: {e}")
+            return {
+                "statusCode": 500,
+                "body": json.dumps({"error": "Classification failed"}),
+            }
+
+        logger.info(f"Classification: {classification}")
+        intent = classification.get('intent', 'neither')
+
+        # Handle based on intent
+        if intent == 'question':
+            # Answer the lore question
+            try:
+                answer = claude.answer_question(message, canon_doc)
+                logger.info(f"Generated answer: {answer[:200]}...")
+                response_body = {
+                    "intent": "answer",
+                    "answer": answer,
+                }
+            except Exception as e:
+                logger.error(f"Failed to generate answer: {e}")
+                response_body = {"error": "Failed to generate answer"}
+
+        elif intent == 'new_lore':
+            # Acknowledge the lore and suggest section
+            section = classification.get('suggested_section', 'Unexplored Ideas')
+            response_body = {
+                "intent": "new_lore",
+                "message": f"Interesting! I think this belongs in **{section}**. React with ✓ to add it, or ✗ to discard.",
+                "suggested_section": section,
+            }
+
+        else:  # neither
+            response_body = {
+                "intent": "neither",
+                "message": "I didn't recognize that as Scuz lore. Ask me about the band, characters, or songs!",
+            }
+
+        logger.info(f"Response: {json.dumps(response_body)}")
 
         return {
             "statusCode": 200,
-            "body": json.dumps({"message": "received"}),
+            "body": json.dumps(response_body),
         }
+
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.error(f"Unhandled error: {e}", exc_info=True)
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": str(e)}),
+            "body": json.dumps({"error": "Internal server error"}),
         }

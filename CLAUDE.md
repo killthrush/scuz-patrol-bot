@@ -74,48 +74,71 @@ scuz-patrol-bot/
 └── CLAUDE.md (this file)
 ```
 
-## Development workflow (one step at a time)
+## Golden Rule: Always Check Tasks First
 
-1. **Backend handler stub** — basic Lambda entry point that receives Discord events
-2. **Discord client** — parse webhook events, extract user message + metadata
-3. **Claude integration** — call Claude to classify intent + generate response
-4. **Google Docs integration** — read current canon, write new entries
-5. **Terraform** — Lambda + API Gateway + IAM roles
-6. **Deploy & test** — local testing, then deploy to dev environment
+**Before running any manual command or operation, check `Taskfile.yml` for an existing task.**
+
+Tasks are the source of truth for how work gets done:
+- Build, test, deploy, format, lint — all have `task` commands
+- Task dependencies ensure correct order (e.g., `test:integration` depends on `build:backend`)
+- Using tasks keeps workflow consistent and reproducible
+
+If you need to do something and there's no task, create one in `Taskfile.yml` and document it in CLAUDE.md.
+
+## Development workflow
 
 ## Testing & Verification
 
 **Always run tests before declaring work complete.** Do not make changes and claim they work without verifying:
 
 ```bash
-# After any code change, run:
-task test:unit        # Unit tests (fast, no external services)
-task test:integration # Integration tests (requires running container)
-task test:all         # Full test suite with coverage
+# Unit tests (fast, mocked, no services needed)
+task test:unit
+
+# Integration tests (rebuilds/restarts container, tests real Lambda)
+# Use this to verify changes work end-to-end
+task test:integration
+
+# Full test suite with coverage reporting
+task test:coverage
+task test:all
 
 # Format and lint:
 task format
 task lint
 ```
 
+**Local development workflow:**
+1. Make code changes in `backend/src/`
+2. Run `task test:unit` to verify logic (fast feedback)
+3. Run `task test:integration` when ready to test against running Lambda container
+4. The integration test task handles: building image, restarting container, running pytest
+
 If a test fails, fix it. Don't move forward with broken tests. See `backend/TESTING.md` for details.
+
+## Deployment
+
+Infrastructure is deployed to AWS (dev environment) via Terraform.
+
+**To complete setup**, populate secrets via `task set-secrets:dev` with your credentials in the environment.
 
 ## Known decisions
 
-- **Docker container deployment** with ECR — same pattern as floodlight, easier to test locally
-- **No persistent state** between invocations — each message is independent
-- **Prompt cache strategy**: fetch canon doc from Google Docs on every invocation, let Anthropic's cache handle the rest
-- **Two environments**: `dev` for testing, live deployment later
-- **Webhook-based, not gateway**: simpler for a single-purpose bot, no persistent connection needed
-- **AWS Lambda with container images** allows `docker run` local testing before deploying
+- **Docker container deployment** with ECR — enables local testing via `docker run` before AWS deployment
+- **Secrets at runtime** — Lambda handler fetches from Secrets Manager at startup, falls back to env vars for local testing
+- **No persistent state** between invocations — each Discord message is independent
+- **Prompt cache strategy**: fetch canon doc from Google Docs on every invocation, let Anthropic's cache handle deduplication
+- **Single-file tests**: unit tests mock everything; integration tests use real running Lambda
+- **Webhook-based architecture**: simpler than persistent connections, scales with Discord's delivery model
 
-## Next steps
+## Local development tasks
 
-See Taskfile.yml for available tasks. Start with:
 ```bash
-task install-deps:backend
-task build:backend
-task build:infra:dev
+task build:backend           # Build Docker image
+task start:backend           # Start/restart container at localhost:9000
+task test:unit              # Run mocked unit tests (fast)
+task test:integration       # Rebuild, restart container, run integration tests
+task test:coverage          # Generate coverage report with branch analysis
+task format                  # Auto-format code (black, ruff)
+task lint                    # Check code quality (ruff, mypy)
 ```
-
-Then move to implementing the handler stub.

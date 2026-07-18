@@ -83,10 +83,10 @@ tasks:
     silent: false
 
   "test:integration":
+    desc: "Run integration tests (uses start:backend to manage container)"
     dir: "{{.USER_WORKING_DIR}}/backend"
+    deps: ["start:backend"]
     cmds:
-      - task build:backend
-      - task start:backend
       - sleep 2
       - source ./venv/bin/activate && pytest tests/integration_tests.py -v && deactivate
     silent: false

@@ -118,22 +118,15 @@ class GoogleDocsClient:
 
         return text
 
-    def append_to_document(self, text: str, section: str = "Unexplored Ideas") -> None:
-        """Append new lore to a section of the document.
+    def append_to_document(self, text: str) -> None:
+        """Append text to the very end of the document.
 
         Args:
-            text: The lore text to add
-            section: The section to append to (e.g., "Band Members", "Supporting Characters")
+            text: The text to add
         """
         try:
-            logger.info(f"Appending to document section: {section}")
+            logger.info("Appending to end of document")
 
-            # Find the section to append to
-            # For now, just append to the end
-            # TODO: Implement section-specific appending
-            # This would require finding the section heading and inserting after it
-
-            # Simple approach: append to end of document
             requests = [
                 {
                     'insertText': {
@@ -152,4 +145,71 @@ class GoogleDocsClient:
 
         except Exception as e:
             logger.error(f"Failed to append to document: {e}")
+            raise
+
+    def append_to_section(self, text: str, section: str) -> None:
+        """Insert new lore text at the end of a named section.
+
+        Finds a heading paragraph matching `section` (case-insensitive) and
+        inserts the text just before the next heading, i.e. at the end of
+        that section's existing content. Falls back to appending at the end
+        of the document if no matching heading is found.
+
+        Args:
+            text: The lore text to add
+            section: The section heading to insert under (e.g., "Band Members")
+        """
+        try:
+            doc = self.service.documents().get(documentId=self.doc_id).execute()
+            content = doc.get('body', {}).get('content', [])
+
+            insert_index = None
+            in_target_section = False
+
+            for element in content:
+                paragraph = element.get('paragraph')
+                if not paragraph:
+                    continue
+
+                style = paragraph.get('paragraphStyle', {}).get('namedStyleType', '')
+                if not style.startswith('HEADING'):
+                    continue
+
+                if in_target_section:
+                    # Found the next heading after our target section started
+                    insert_index = element['startIndex']
+                    break
+
+                heading_text = self._extract_text_from_element(paragraph).strip()
+                if heading_text.lower() == section.strip().lower():
+                    in_target_section = True
+
+            if in_target_section and insert_index is None and content:
+                # Target section was the last one in the document
+                insert_index = content[-1]['endIndex'] - 1
+
+            if insert_index is None:
+                logger.warning(f"Section '{section}' not found, appending to end of document")
+                self.append_to_document(text)
+                return
+
+            logger.info(f"Inserting lore into section '{section}' at index {insert_index}")
+            requests = [
+                {
+                    'insertText': {
+                        'text': f'\n{text}\n',
+                        'location': {'index': insert_index},
+                    }
+                }
+            ]
+
+            self.service.documents().batchUpdate(
+                documentId=self.doc_id,
+                body={'requests': requests}
+            ).execute()
+
+            logger.info(f"Successfully inserted {len(text)} characters into section '{section}'")
+
+        except Exception as e:
+            logger.error(f"Failed to append to section '{section}': {e}")
             raise

@@ -13,10 +13,11 @@ follow-up webhook.
 
 import json
 import os
+import re
 import logging
 import boto3
 import requests  # type: ignore
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from src.discord_client import parse_discord_event, extract_message_from_event
@@ -30,6 +31,13 @@ logger = logging.getLogger()
 logger.setLevel(os.getenv('LOG_LEVEL', 'INFO'))
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
+
+# Marks the lore text/section embedded in a pending confirmation message, so a
+# later button click can recover them without needing external state storage.
+LORE_MESSAGE_PATTERN = re.compile(
+    r"Section: (?P<section>.+)\n---\n(?P<text>.*)\n---",
+    re.DOTALL,
+)
 
 
 def _initialize_secrets() -> None:
@@ -107,11 +115,7 @@ def _process_message(message: str) -> Dict[str, Any]:
 
     if intent == 'new_lore':
         section = classification.get('suggested_section', 'Unexplored Ideas')
-        content = (
-            f"Interesting! I think this belongs in **{section}**. "
-            f"React with ✓ to add it, or ✗ to discard."
-        )
-        return {"intent": "new_lore", "content": content, "suggested_section": section}
+        return {"intent": "new_lore", "suggested_section": section}
 
     return {
         "intent": "neither",
@@ -119,12 +123,55 @@ def _process_message(message: str) -> Dict[str, Any]:
     }
 
 
-def _send_discord_followup(interaction_token: str, content: str) -> None:
+def _build_lore_confirmation_message(text: str, section: str) -> Dict[str, Any]:
+    """Build a Discord message asking the user to confirm/discard new lore.
+
+    Embeds the lore text and section in the message content (delimited by
+    "---") so a later button click can recover them from the message itself,
+    without needing external state storage.
+    """
+    content = (
+        f"🆕 **New lore suggestion**\n"
+        f"Section: {section}\n"
+        f"---\n"
+        f"{text}\n"
+        f"---\n"
+        f"Add this to the canon?"
+    )
+    components = [
+        {
+            "type": 1,  # ACTION_ROW
+            "components": [
+                {"type": 2, "style": 3, "label": "Confirm", "custom_id": "lore_confirm"},
+                {"type": 2, "style": 4, "label": "Discard", "custom_id": "lore_discard"},
+            ],
+        }
+    ]
+    return {"content": content, "components": components}
+
+
+def _parse_lore_message(content: str) -> Optional[Dict[str, str]]:
+    """Recover the lore text and section embedded in a confirmation message."""
+    match = LORE_MESSAGE_PATTERN.search(content)
+    if not match:
+        return None
+    return {
+        "section": match.group("section").strip(),
+        "text": match.group("text").strip(),
+    }
+
+
+def _send_discord_followup(
+    interaction_token: str, content: str, components: Optional[List[Any]] = None
+) -> None:
     """Send the real answer to Discord via the interaction follow-up webhook."""
     application_id = os.getenv('DISCORD_APPLICATION_ID')
     url = f"{DISCORD_API_BASE}/webhooks/{application_id}/{interaction_token}/messages/@original"
+    payload: Dict[str, Any] = {"content": content}
+    if components is not None:
+        payload["components"] = components
     try:
-        response = requests.patch(url, json={"content": content}, timeout=10)
+        response = requests.patch(url, json=payload, timeout=10)
         response.raise_for_status()
     except Exception as e:
         logger.error(f"Failed to send Discord follow-up: {e}")
@@ -140,10 +187,104 @@ def _handle_async_worker(event: Dict[str, Any]) -> Dict[str, Any]:
         return {"statusCode": 400}
 
     result = _process_message(message)
+
+    if result.get('intent') == 'new_lore':
+        section = str(result.get('suggested_section', 'Unexplored Ideas'))
+        lore_message = _build_lore_confirmation_message(message, section)
+        _send_discord_followup(interaction_token, lore_message['content'], lore_message['components'])
+        return {"statusCode": 200}
+
     reply: str = str(result.get('content') or result.get('error', 'Something went wrong.'))
     content = f"> **{message}**\n\n{reply}"
     _send_discord_followup(interaction_token, content)
     return {"statusCode": 200}
+
+
+def _handle_lore_worker(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Write confirmed lore to the canon doc, then notify Discord."""
+    text: Optional[str] = event.get('text')
+    section: Optional[str] = event.get('section')
+    interaction_token: Optional[str] = event.get('interaction_token')
+
+    if not text or not section or not interaction_token:
+        logger.error("Lore worker invoked with missing text/section/interaction_token")
+        return {"statusCode": 400}
+
+    try:
+        docs = GoogleDocsClient()
+        docs.append_to_section(text, section)
+        content = f"✅ Added to **{section}**."
+    except Exception as e:
+        logger.error(f"Failed to write lore to canon doc: {e}")
+        content = "⚠️ Failed to save this to the canon doc. Please try again."
+
+    _send_discord_followup(interaction_token, content, components=[])
+    return {"statusCode": 200}
+
+
+def _handle_component_interaction(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle Confirm/Discard button clicks on a pending lore submission."""
+    custom_id = parsed_event.get('custom_id')
+    interaction_token = parsed_event.get('interaction_token')
+
+    if custom_id == 'lore_discard':
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({
+                "type": 7,  # UPDATE_MESSAGE
+                "data": {"content": "❌ Discarded.", "components": []},
+            }),
+        }
+
+    if custom_id == 'lore_confirm':
+        parsed_lore = _parse_lore_message(parsed_event.get('message_content', ''))
+        if not parsed_lore:
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({
+                    "type": 7,
+                    "data": {
+                        "content": "⚠️ Couldn't read this submission anymore. Please try /lore again.",
+                        "components": [],
+                    },
+                }),
+            }
+
+        function_name = os.getenv('AWS_LAMBDA_FUNCTION_NAME')
+        if function_name:
+            try:
+                lambda_client = boto3.client('lambda')
+                lambda_client.invoke(
+                    FunctionName=function_name,
+                    InvocationType='Event',
+                    Payload=json.dumps({
+                        'source': 'discord_lore_worker',
+                        'text': parsed_lore['text'],
+                        'section': parsed_lore['section'],
+                        'interaction_token': interaction_token,
+                    }).encode('utf-8'),
+                )
+            except Exception as e:
+                logger.error(f"Failed to invoke lore worker: {e}")
+        else:
+            logger.warning(
+                "AWS_LAMBDA_FUNCTION_NAME not set; skipping lore worker invocation (local testing?)"
+            )
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"type": 6}),  # DEFERRED_UPDATE_MESSAGE
+        }
+
+    logger.warning(f"Unknown component custom_id: {custom_id}")
+    return {
+        "statusCode": 400,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"error": "Unknown interaction"}),
+    }
 
 
 def _defer_and_process_async(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
@@ -192,6 +333,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if event.get('source') == 'discord_async_worker':
         return _handle_async_worker(event)
 
+    if event.get('source') == 'discord_lore_worker':
+        return _handle_lore_worker(event)
+
     try:
         logger.info(f"Received event: {json.dumps(event)}")
 
@@ -214,6 +358,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "headers": {"Content-Type": "application/json"},
                 "body": json.dumps(parsed_event.get('respond_with', {})),
             }
+
+        # Handle button clicks (Confirm/Discard on a pending lore submission)
+        if parsed_event.get('type') == 'component':
+            return _handle_component_interaction(parsed_event)
 
         # Extract the user's message
         message = extract_message_from_event(parsed_event)

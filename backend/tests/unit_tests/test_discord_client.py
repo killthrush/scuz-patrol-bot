@@ -59,6 +59,44 @@ class TestParseDiscordEvent:
         assert parsed["user_id"] == "user_789"
         assert parsed["user_name"] == "alice"
 
+    def test_parses_component_event(self):
+        """MESSAGE_COMPONENT (type=3, button click) should return component type."""
+        event = {
+            "headers": {},
+            "body": json.dumps({
+                "type": 3,
+                "id": "interaction_999",
+                "token": "token_xyz",
+                "guild_id": "guild_456",
+                "channel_id": "channel_789",
+                "member": {"user": {"id": "user_111", "username": "testuser"}},
+                "data": {"custom_id": "lore_confirm"},
+                "message": {"content": "Section: Band Members\n---\nSome lore\n---\nConfirm?"},
+            }),
+        }
+        parsed = parse_discord_event(event)
+
+        assert parsed["type"] == "component"
+        assert parsed["custom_id"] == "lore_confirm"
+        assert parsed["interaction_token"] == "token_xyz"
+        assert "Band Members" in parsed["message_content"]
+
+    def test_component_event_defaults_missing_message(self):
+        """Component events without a message body shouldn't crash."""
+        event = {
+            "headers": {},
+            "body": json.dumps({
+                "type": 3,
+                "id": "int_1",
+                "token": "tok_1",
+                "data": {"custom_id": "lore_discard"},
+            }),
+        }
+        parsed = parse_discord_event(event)
+
+        assert parsed["type"] == "component"
+        assert parsed["message_content"] == ""
+
 
 class TestExtractMessageFromEvent:
     """Test message extraction from events."""

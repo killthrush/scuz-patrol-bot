@@ -112,7 +112,7 @@ class TestAsyncWorkerProcessing:
         assert "Here's the answer" in sent_content
 
     def test_new_lore_intent(self, mock_clients):
-        """Should acknowledge new lore and suggest a section in the follow-up."""
+        """Should send a Confirm/Discard button prompt with the section embedded."""
         mock_clients['claude'].classify_intent.return_value = {
             'intent': 'new_lore',
             'confidence': 0.88,
@@ -124,8 +124,14 @@ class TestAsyncWorkerProcessing:
             response = lambda_handler(self.async_event(), None)
 
         assert response['statusCode'] == 200
-        sent_content = mock_patch.call_args.kwargs['json']['content']
-        assert "Band Members" in sent_content
+        sent_json = mock_patch.call_args.kwargs['json']
+        assert "Band Members" in sent_json['content']
+        custom_ids = {
+            button['custom_id']
+            for row in sent_json['components']
+            for button in row['components']
+        }
+        assert custom_ids == {'lore_confirm', 'lore_discard'}
 
     def test_neither_intent(self, mock_clients):
         """Should handle off-topic messages."""
@@ -219,6 +225,130 @@ class TestAsyncWorkerErrorHandling:
         assert response['statusCode'] == 200
         sent_content = mock_patch.call_args.kwargs['json']['content']
         assert "Failed to generate answer" in sent_content
+
+
+def component_event(custom_id: str, message_content: str = "") -> dict:
+    """Build a Discord MESSAGE_COMPONENT (button click) event."""
+    return {
+        "headers": {},
+        "body": json.dumps({
+            "type": 3,
+            "token": "interaction_token_abc",
+            "data": {"custom_id": custom_id},
+            "message": {"content": message_content},
+        })
+    }
+
+
+LORE_MESSAGE_CONTENT = (
+    "🆕 **New lore suggestion**\n"
+    "Section: Band Members\n"
+    "---\n"
+    "Kilgore joined in 2020\n"
+    "---\n"
+    "Add this to the canon?"
+)
+
+
+class TestComponentInteraction:
+    """Test Confirm/Discard button clicks on a pending lore submission."""
+
+    def test_discard_updates_message_immediately(self, mock_clients):
+        """Discard should synchronously clear the message, no async work needed."""
+        event = component_event("lore_discard", LORE_MESSAGE_CONTENT)
+        response = lambda_handler(event, None)
+
+        assert response['statusCode'] == 200
+        body = json.loads(response['body'])
+        assert body['type'] == 7  # UPDATE_MESSAGE
+        assert body['data']['content'] == "❌ Discarded."
+        assert body['data']['components'] == []
+
+    def test_confirm_defers_and_invokes_lore_worker(self, mock_clients, monkeypatch):
+        """Confirm should defer the update and hand off to the async lore worker."""
+        monkeypatch.setenv('AWS_LAMBDA_FUNCTION_NAME', 'scuz-patrol-bot-dev')
+        event = component_event("lore_confirm", LORE_MESSAGE_CONTENT)
+
+        with patch('src.handler.boto3.client') as mock_boto_client:
+            mock_lambda_client = Mock()
+            mock_boto_client.return_value = mock_lambda_client
+            response = lambda_handler(event, None)
+
+        assert response['statusCode'] == 200
+        body = json.loads(response['body'])
+        assert body['type'] == 6  # DEFERRED_UPDATE_MESSAGE
+
+        assert mock_lambda_client.invoke.called
+        payload = json.loads(mock_lambda_client.invoke.call_args.kwargs['Payload'])
+        assert payload['source'] == 'discord_lore_worker'
+        assert payload['text'] == 'Kilgore joined in 2020'
+        assert payload['section'] == 'Band Members'
+        assert payload['interaction_token'] == 'interaction_token_abc'
+
+    def test_confirm_with_unparseable_message(self, mock_clients):
+        """Should warn instead of crashing if the message can't be parsed anymore."""
+        event = component_event("lore_confirm", "some unrelated message content")
+        response = lambda_handler(event, None)
+
+        assert response['statusCode'] == 200
+        body = json.loads(response['body'])
+        assert body['type'] == 7
+        assert "try /lore again" in body['data']['content']
+
+    def test_unknown_custom_id_returns_400(self, mock_clients):
+        """Unrecognized custom_id should return an error, not silently succeed."""
+        event = component_event("something_else", LORE_MESSAGE_CONTENT)
+        response = lambda_handler(event, None)
+
+        assert response['statusCode'] == 400
+
+
+class TestLoreWorker:
+    """Test the async worker that writes confirmed lore to the canon doc."""
+
+    def test_writes_lore_and_reports_success(self, mock_clients):
+        with patch('src.handler.requests.patch') as mock_patch:
+            response = lambda_handler({
+                'source': 'discord_lore_worker',
+                'text': 'Kilgore joined in 2020',
+                'section': 'Band Members',
+                'interaction_token': 'tok',
+            }, None)
+
+        assert response['statusCode'] == 200
+        mock_clients['docs'].append_to_section.assert_called_once_with(
+            'Kilgore joined in 2020', 'Band Members'
+        )
+        sent_json = mock_patch.call_args.kwargs['json']
+        assert "Band Members" in sent_json['content']
+        assert sent_json['components'] == []
+
+    def test_reports_failure_when_doc_write_fails(self, mock_clients):
+        mock_clients['docs'].append_to_section.side_effect = Exception("API error")
+
+        with patch('src.handler.requests.patch') as mock_patch:
+            response = lambda_handler({
+                'source': 'discord_lore_worker',
+                'text': 'Kilgore joined in 2020',
+                'section': 'Band Members',
+                'interaction_token': 'tok',
+            }, None)
+
+        assert response['statusCode'] == 200
+        sent_content = mock_patch.call_args.kwargs['json']['content']
+        assert "Failed to save" in sent_content
+
+    def test_missing_fields_skips_processing(self, mock_clients):
+        with patch('src.handler.requests.patch') as mock_patch:
+            response = lambda_handler({
+                'source': 'discord_lore_worker',
+                'text': None,
+                'section': 'Band Members',
+                'interaction_token': 'tok',
+            }, None)
+
+        assert response['statusCode'] == 400
+        assert not mock_patch.called
 
 
 class TestHandlerErrorHandling:

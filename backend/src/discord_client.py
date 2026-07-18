@@ -131,6 +131,24 @@ def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
             'command_options': interaction.get('options', []),
         }
 
+    # Handle MESSAGE_COMPONENT events (button clicks)
+    if payload.get('type') == 3:  # MESSAGE_COMPONENT
+        interaction = payload.get('data', {})
+        user = payload.get('member', {}).get('user', {})
+        message = payload.get('message', {})
+
+        return {
+            'type': 'component',
+            'interaction_token': payload.get('token'),
+            'interaction_id': payload.get('id'),
+            'guild_id': payload.get('guild_id'),
+            'channel_id': payload.get('channel_id'),
+            'user_id': user.get('id'),
+            'user_name': user.get('username'),
+            'custom_id': interaction.get('custom_id'),
+            'message_content': message.get('content', ''),
+        }
+
     # Fallback for unknown event types
     logger.warning(f"Unhandled Discord event type: {payload.get('type')}")
     return {

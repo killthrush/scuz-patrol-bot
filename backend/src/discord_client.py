@@ -68,10 +68,13 @@ def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns:
         Parsed event with: type, user_id, guild_id, channel_id, message_content, etc.
+        Returns {'type': 'invalid_signature'} if signature verification fails.
 
     Raises:
         DiscordWebhookError: If event structure is invalid
     """
+    import os
+
     # Extract headers for signature verification
     headers = event.get('headers', {})
     signature = headers.get('x-signature-ed25519')
@@ -84,9 +87,13 @@ def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
     else:
         body_str = json.dumps(body)
 
-    # TODO: Verify signature here using Discord public key
-    # For now, just log a warning
-    if not signature or not timestamp:
+    # Verify Discord signature
+    public_key = os.getenv('DISCORD_PUBLIC_KEY')
+    if public_key and signature and timestamp:
+        if not verify_discord_signature(body_str, signature, timestamp, public_key):
+            logger.warning("Invalid Discord signature")
+            return {'type': 'invalid_signature'}
+    elif signature or timestamp:
         logger.warning("Missing Discord signature headers")
 
     # Parse the JSON payload

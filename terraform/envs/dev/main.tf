@@ -36,6 +36,7 @@ resource "aws_iam_role_policy" "lambda_secrets" {
         aws_secretsmanager_secret.discord_token.arn,
         aws_secretsmanager_secret.anthropic_api_key.arn,
         aws_secretsmanager_secret.google_service_account.arn,
+        aws_secretsmanager_secret.discord_public_key.arn,
       ]
     }]
   })
@@ -58,6 +59,12 @@ resource "aws_secretsmanager_secret" "google_service_account" {
   name                    = "${var.function_name}/google-service-account"
   recovery_window_in_days = 7
   description             = "Google service account key for Docs API"
+}
+
+resource "aws_secretsmanager_secret" "discord_public_key" {
+  name                    = "${var.function_name}/discord-public-key"
+  recovery_window_in_days = 7
+  description             = "Discord public key for interaction signature verification"
 }
 
 # ECR repository for Lambda container images

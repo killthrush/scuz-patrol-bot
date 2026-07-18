@@ -33,6 +33,7 @@ def _initialize_secrets() -> None:
         'ANTHROPIC_API_KEY': 'scuz-patrol-bot-dev/anthropic-api-key',
         'DISCORD_BOT_TOKEN': 'scuz-patrol-bot-dev/discord-token',
         'GOOGLE_SERVICE_ACCOUNT_KEY': 'scuz-patrol-bot-dev/google-service-account',
+        'DISCORD_PUBLIC_KEY': 'scuz-patrol-bot-dev/discord-public-key',
     }
 
     for env_var, secret_name in secrets.items():
@@ -72,6 +73,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Parse the Discord webhook event
         parsed_event = parse_discord_event(event)
         logger.info(f"Parsed event type: {parsed_event.get('type')}")
+
+        # Reject requests with invalid signatures
+        if parsed_event.get('type') == 'invalid_signature':
+            return {
+                "statusCode": 401,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"error": "Invalid signature"}),
+            }
 
         # Handle ping challenges from Discord
         if parsed_event.get('type') == 'ping':

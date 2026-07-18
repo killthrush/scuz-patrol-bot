@@ -46,10 +46,7 @@ class TestMessageParsing:
     def test_handles_missing_message(self, lambda_client):
         """When no message in event, return 400."""
         event = {
-            "headers": {
-                "x-signature-ed25519": "test",
-                "x-signature-timestamp": "1234567890",
-            },
+            "headers": {},
             "body": json.dumps({
                 "type": 3,
                 "id": "test",

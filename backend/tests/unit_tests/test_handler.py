@@ -58,10 +58,7 @@ class TestHandlerMessageProcessing:
         mock_clients['docs'].read_document.return_value = "Canon doc content"
 
         event = {
-            "headers": {
-                "x-signature-ed25519": "test",
-                "x-signature-timestamp": "1234567890",
-            },
+            "headers": {},
             "body": json.dumps({
                 "type": 3,
                 "data": {
@@ -85,10 +82,7 @@ class TestHandlerMessageProcessing:
         mock_clients['docs'].read_document.return_value = "Canon doc content"
 
         event = {
-            "headers": {
-                "x-signature-ed25519": "test",
-                "x-signature-timestamp": "1234567890",
-            },
+            "headers": {},
             "body": json.dumps({
                 "type": 3,
                 "data": {
@@ -112,10 +106,7 @@ class TestHandlerMessageProcessing:
         mock_clients['docs'].read_document.return_value = "Canon doc content"
 
         event = {
-            "headers": {
-                "x-signature-ed25519": "test",
-                "x-signature-timestamp": "1234567890",
-            },
+            "headers": {},
             "body": json.dumps({
                 "type": 3,
                 "data": {
@@ -150,10 +141,7 @@ class TestHandlerErrorHandling:
         mock_clients['claude_class'].side_effect = ValueError("Missing API key")
 
         event = {
-            "headers": {
-                "x-signature-ed25519": "test",
-                "x-signature-timestamp": "1234567890",
-            },
+            "headers": {},
             "body": json.dumps({
                 "type": 3,
                 "data": {
@@ -171,10 +159,7 @@ class TestHandlerErrorHandling:
         mock_clients['docs'].read_document.side_effect = Exception("API error")
 
         event = {
-            "headers": {
-                "x-signature-ed25519": "test",
-                "x-signature-timestamp": "1234567890",
-            },
+            "headers": {},
             "body": json.dumps({
                 "type": 3,
                 "data": {
@@ -193,10 +178,7 @@ class TestHandlerErrorHandling:
         mock_clients['docs'].read_document.return_value = "Canon doc"
 
         event = {
-            "headers": {
-                "x-signature-ed25519": "test",
-                "x-signature-timestamp": "1234567890",
-            },
+            "headers": {},
             "body": json.dumps({
                 "type": 3,
                 "data": {
@@ -219,10 +201,7 @@ class TestHandlerErrorHandling:
         mock_clients['docs'].read_document.return_value = "Canon doc"
 
         event = {
-            "headers": {
-                "x-signature-ed25519": "test",
-                "x-signature-timestamp": "1234567890",
-            },
+            "headers": {},
             "body": json.dumps({
                 "type": 3,
                 "data": {

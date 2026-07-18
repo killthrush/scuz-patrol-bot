@@ -10,7 +10,7 @@ class TestParseDiscordEvent:
     def test_parses_ping_challenge(self):
         """INTERACTION_PING (type=1) should return ping type."""
         event = {
-            "headers": {"x-signature-ed25519": "sig", "x-signature-timestamp": "ts"},
+            "headers": {},
             "body": json.dumps({"type": 1}),
         }
         parsed = parse_discord_event(event)
@@ -21,7 +21,7 @@ class TestParseDiscordEvent:
     def test_parses_command_event(self):
         """APPLICATION_COMMAND (type=3) should return command type."""
         event = {
-            "headers": {"x-signature-ed25519": "sig", "x-signature-timestamp": "ts"},
+            "headers": {},
             "body": json.dumps({
                 "type": 3,
                 "id": "interaction_123",
@@ -41,7 +41,7 @@ class TestParseDiscordEvent:
     def test_extracts_user_details(self):
         """Should extract all user and guild information."""
         event = {
-            "headers": {"x-signature-ed25519": "sig", "x-signature-timestamp": "ts"},
+            "headers": {},
             "body": json.dumps({
                 "type": 3,
                 "id": "int_1",

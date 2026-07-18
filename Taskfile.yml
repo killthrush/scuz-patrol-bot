@@ -58,6 +58,8 @@ tasks:
         aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/anthropic-api-key --secret-string "$ANTHROPIC_API_KEY" --region us-east-1
         echo "Setting Google service account key..."
         aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/google-service-account --secret-string "$GOOGLE_SERVICE_ACCOUNT_KEY" --region us-east-1
+        echo "Setting Discord public key..."
+        aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/discord-public-key --secret-string "$DISCORD_PUBLIC_KEY" --region us-east-1
         echo "✓ Secrets updated in AWS Secrets Manager"
     silent: false
 
@@ -79,6 +81,12 @@ tasks:
     dir: "{{.USER_WORKING_DIR}}/terraform/envs/dev"
     cmds:
       - terraform output --json | jq -r '.'
+    silent: false
+
+  "register:commands:dev":
+    dir: "{{.USER_WORKING_DIR}}"
+    cmds:
+      - source ./backend/venv/bin/activate && python3 scripts/register_commands.py && deactivate
     silent: false
 
   "test:unit":

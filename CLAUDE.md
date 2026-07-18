@@ -85,6 +85,8 @@ Tasks are the source of truth for how work gets done:
 
 If you need to do something and there's no task, create one in `Taskfile.yml` and document it in CLAUDE.md.
 
+**When adding new tasks: read existing tasks first.** Don't invent new patterns. If other tasks source `.env` one way, all tasks should do it the same way. Check what's already there before coding.
+
 ## Development workflow
 
 ## Testing & Verification
@@ -120,14 +122,26 @@ If a test fails, fix it. Don't move forward with broken tests. See `backend/TEST
 
 Infrastructure is deployed to AWS (dev environment) via Terraform.
 
-**To complete setup**, populate secrets in AWS Secrets Manager:
-1. Add your credentials to `.env` file (never commit):
-   ```
-   DISCORD_BOT_TOKEN=...
-   ANTHROPIC_API_KEY=...
-   GOOGLE_SERVICE_ACCOUNT_KEY='{"type":"service_account",...}'
-   ```
-2. Run `task set-secrets:dev` — automatically loads `.env` and pushes to Secrets Manager
+**CRITICAL: Secrets Management**
+
+⚠️ **I (the assistant) will never touch `.env` or run any secret-related tasks.** You must do this yourself.
+
+Your `.env` file must define these credentials (never commit):
+```
+DISCORD_BOT_TOKEN=...              # Bot token from Discord Developer Portal
+DISCORD_PUBLIC_KEY=...             # Public key for signature verification
+DISCORD_APPLICATION_ID=...         # Application ID
+ANTHROPIC_API_KEY=...              # Claude API key
+GOOGLE_SERVICE_ACCOUNT_KEY=...     # GCP service account JSON
+GUILD_ID=...                       # Discord server ID
+```
+
+**To deploy with secrets**:
+1. **You populate `.env`** with the values above
+2. **You run** `task set-secrets:dev` to push to AWS Secrets Manager
+3. **You run** `task register:commands:dev` to register slash commands with Discord
+
+I will never run these tasks or read `.env` — you handle all credential management.
 
 ## Known decisions
 

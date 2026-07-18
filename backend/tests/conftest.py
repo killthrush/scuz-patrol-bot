@@ -16,10 +16,7 @@ def lambda_url() -> str:
 def discord_ping_event() -> Dict[str, Any]:
     """Discord INTERACTION_PING challenge (type=1)."""
     return {
-        "headers": {
-            "x-signature-ed25519": "test_signature",
-            "x-signature-timestamp": "1234567890",
-        },
+        "headers": {},
         "body": json.dumps({
             "type": 1,  # INTERACTION_PING
         }),
@@ -30,10 +27,7 @@ def discord_ping_event() -> Dict[str, Any]:
 def discord_command_event(monkeypatch) -> Dict[str, Any]:
     """Discord slash command event (type=3, APPLICATION_COMMAND)."""
     return {
-        "headers": {
-            "x-signature-ed25519": "test_signature",
-            "x-signature-timestamp": "1234567890",
-        },
+        "headers": {},
         "body": json.dumps({
             "type": 3,  # APPLICATION_COMMAND
             "id": "interaction_id_123",
@@ -65,10 +59,7 @@ def discord_command_event(monkeypatch) -> Dict[str, Any]:
 def discord_lore_event() -> Dict[str, Any]:
     """Discord slash command for new lore."""
     return {
-        "headers": {
-            "x-signature-ed25519": "test_signature",
-            "x-signature-timestamp": "1234567890",
-        },
+        "headers": {},
         "body": json.dumps({
             "type": 3,  # APPLICATION_COMMAND
             "id": "interaction_id_456",

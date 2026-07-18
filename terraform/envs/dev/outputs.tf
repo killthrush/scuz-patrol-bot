@@ -1,6 +1,17 @@
-output "lambda_function_name" {
-  description = "Lambda function name"
-  value       = aws_lambda_function.bot.function_name
+output "lambda_function" {
+  description = "Lambda function name and other details"
+  value = {
+    name = aws_lambda_function.bot.function_name
+    arn  = aws_lambda_function.bot.arn
+  }
+}
+
+output "image_repo" {
+  description = "ECR repository for Lambda container images"
+  value = {
+    url = aws_ecr_repository.bot.repository_url
+    arn = aws_ecr_repository.bot.arn
+  }
 }
 
 output "webhook_url" {

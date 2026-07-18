@@ -107,9 +107,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         elif intent == 'new_lore':
             # Acknowledge the lore and suggest section
             section = classification.get('suggested_section', 'Unexplored Ideas')
+            message = f"Interesting! I think this belongs in **{section}**. React with ✓ to add it, or ✗ to discard."
             response_body = {
                 "intent": "new_lore",
-                "message": f"Interesting! I think this belongs in **{section}**. React with ✓ to add it, or ✗ to discard.",
+                "message": message,
                 "suggested_section": section,
             }
 

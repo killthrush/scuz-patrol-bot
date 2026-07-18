@@ -83,13 +83,31 @@ scuz-patrol-bot/
 5. **Terraform** — Lambda + API Gateway + IAM roles
 6. **Deploy & test** — local testing, then deploy to dev environment
 
+## Testing & Verification
+
+**Always run tests before declaring work complete.** Do not make changes and claim they work without verifying:
+
+```bash
+# After any code change, run:
+task test:unit        # Unit tests (fast, no external services)
+task test:integration # Integration tests (requires running container)
+task test:all         # Full test suite with coverage
+
+# Format and lint:
+task format
+task lint
+```
+
+If a test fails, fix it. Don't move forward with broken tests. See `backend/TESTING.md` for details.
+
 ## Known decisions
 
-- **Python zip deployment** (not Docker) for simplicity and faster cold starts
+- **Docker container deployment** with ECR — same pattern as floodlight, easier to test locally
 - **No persistent state** between invocations — each message is independent
 - **Prompt cache strategy**: fetch canon doc from Google Docs on every invocation, let Anthropic's cache handle the rest
 - **Two environments**: `dev` for testing, live deployment later
 - **Webhook-based, not gateway**: simpler for a single-purpose bot, no persistent connection needed
+- **AWS Lambda with container images** allows `docker run` local testing before deploying
 
 ## Next steps
 

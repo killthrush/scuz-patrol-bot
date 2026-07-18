@@ -91,9 +91,13 @@ def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
 
     # Parse the JSON payload
     try:
+        if not body_str or not body_str.strip():
+            logger.warning("Empty request body")
+            return {'type': 'unknown', 'raw_payload': {}}
         payload = json.loads(body_str)
     except json.JSONDecodeError as e:
-        raise DiscordWebhookError(f"Invalid JSON in request body: {e}")
+        logger.error(f"Invalid JSON in request body: {e}")
+        return {'type': 'unknown', 'raw_payload': {}}
 
     # Handle Discord challenge (required for initial webhook registration)
     if payload.get('type') == 1:  # INTERACTION_PING

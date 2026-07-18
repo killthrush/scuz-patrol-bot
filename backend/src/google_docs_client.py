@@ -6,7 +6,6 @@ import logging
 import os
 from typing import Optional
 
-from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 

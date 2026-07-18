@@ -20,16 +20,27 @@ resource "aws_iam_role_policy_attachment" "lambda_logs" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Lambda function
+# ECR repository for Lambda container images
+resource "aws_ecr_repository" "bot" {
+  name                 = "${var.function_name}-repo"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+# Lambda function with container image
 resource "aws_lambda_function" "bot" {
-  filename         = "../../lambda_deployment.zip"
-  function_name    = var.function_name
-  role             = aws_iam_role.lambda_role.arn
-  handler          = var.handler
-  runtime          = var.runtime
-  timeout          = var.timeout
-  memory_size      = var.memory_size
-  source_code_hash = filebase64sha256("../../lambda_deployment.zip")
+  function_name = var.function_name
+  role          = aws_iam_role.lambda_role.arn
+  timeout       = var.timeout
+  memory_size   = var.memory_size
+  architectures = ["x86_64"]
+
+  image_uri = "${aws_ecr_repository.bot.repository_url}:latest"
+  package_type = "Image"
 
   environment {
     variables = {

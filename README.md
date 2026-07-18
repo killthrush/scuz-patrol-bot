@@ -7,10 +7,13 @@ See [CLAUDE.md](CLAUDE.md) for the full vision, architecture, and setup details.
 ## Quick start
 
 ```bash
-# Install dependencies
-task install-deps:backend
+# Initialize Python venv and install dependencies
+task init:backend
 
-# Build Lambda deployment package
+# Run tests to verify everything works
+task test:unit
+
+# Build Docker image
 task build:backend
 
 # Plan infrastructure
@@ -20,6 +23,20 @@ task build:infra:dev
 task deploy:infra:dev
 task deploy:backend:dev
 ```
+
+## Testing
+
+**Always run tests before declaring work complete:**
+
+```bash
+task test:unit            # Fast unit tests (no external services)
+task test:integration     # Integration tests (requires running container)
+task test:all             # Full suite with coverage
+task format               # Auto-format code
+task lint                 # Check types and style
+```
+
+See `backend/TESTING.md` for details.
 
 ## Commands
 

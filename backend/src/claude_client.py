@@ -56,7 +56,8 @@ Classify each message as one of:
 2. **question**: A question about existing lore that needs to be answered
 3. **neither**: Not relevant to the lore (off-topic chat, images, etc.)
 
-For new_lore, suggest which section it belongs in (Band Chronology, Band Members, Supporting Characters, Virtual Discography, etc.).
+For new_lore, suggest which section it belongs in (Band Chronology, Band Members,
+Supporting Characters, Virtual Discography, etc.).
 
 For questions, identify what part of the canon is relevant.
 
@@ -80,7 +81,7 @@ Respond with JSON matching this schema:
         try:
             logger.info(f"Classifying message: {user_message[:100]}...")
 
-            response = self.client.messages.create(
+            response = self.client.messages.create(  # type: ignore
                 model=self.model,
                 max_tokens=500,
                 system=[
@@ -151,7 +152,7 @@ CANON COMPENDIUM:
         try:
             logger.info(f"Answering question: {question[:100]}...")
 
-            response = self.client.messages.create(
+            response = self.client.messages.create(  # type: ignore
                 model=self.model,
                 max_tokens=1000,
                 system=[

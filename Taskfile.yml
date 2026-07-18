@@ -1,20 +1,35 @@
 version: "3"
 
 tasks:
+  "init:backend":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - python3 -m venv venv
+      - source ./venv/bin/activate && pip install --upgrade pip && pip install -r requirements-dev.txt && deactivate
+    silent: false
+
   "install-deps:backend":
     dir: "{{.USER_WORKING_DIR}}/backend"
     cmds:
-      - pip install --upgrade pip
-      - pip install -r requirements.txt
+      - source ./venv/bin/activate && pip install --upgrade pip && pip install -r requirements-dev.txt && deactivate
     silent: false
 
   "build:backend":
     dir: "{{.USER_WORKING_DIR}}/backend"
     cmds:
-      - mkdir -p build
-      - cp -r src/* build/
-      - pip install -r requirements.txt -t build/ --upgrade
-      - cd build && zip -r ../lambda_deployment.zip . && cd ..
+      - docker stop scuz-patrol > /dev/null 2>&1 || true
+      - docker rm scuz-patrol > /dev/null 2>&1 || true
+      - docker rmi scuz-patrol:latest > /dev/null 2>&1 || true
+      - docker build --platform linux/amd64 -t scuz-patrol:latest .
+    silent: false
+
+  "start:backend":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - docker stop scuz-patrol > /dev/null 2>&1 || true
+      - docker rm scuz-patrol > /dev/null 2>&1 || true
+      - aws sts get-session-token | jq -r '.Credentials | ["AWS_ACCESS_KEY_ID=" + .AccessKeyId, "AWS_SECRET_ACCESS_KEY=" + .SecretAccessKey, "AWS_SESSION_TOKEN=" + .SessionToken] | .[]' > .env-creds
+      - docker run --platform linux/amd64 -d --name scuz-patrol -p 9000:8080 --env-file ../.env --env-file .env-creds scuz-patrol:latest
     silent: false
 
   "build:infra:dev":
@@ -33,10 +48,15 @@ tasks:
   "deploy:backend:dev":
     dir: "{{.USER_WORKING_DIR}}"
     cmds:
-      - aws lambda update-function-code --function-name {{.FUNCTION_NAME}} --zip-file fileb://lambda_deployment.zip
+      - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin {{.REPO_URL}}
+      - docker tag scuz-patrol:latest {{.REPO_URL}}:latest
+      - docker push {{.REPO_URL}}:latest
+      - aws lambda update-function-code --function-name {{.FUNCTION_NAME}} --image-uri {{.REPO_URL}}:latest
     vars:
+      REPO_URL:
+        sh: task describe:infra:dev | jq -r '.image_repo.value.url'
       FUNCTION_NAME:
-        sh: task describe:infra:dev | jq -r '.lambda_function_name.value'
+        sh: task describe:infra:dev | jq -r '.lambda_function.value.name'
     silent: false
 
   "describe:infra:dev":
@@ -45,7 +65,44 @@ tasks:
       - terraform output --json | jq -r '.'
     silent: false
 
+  "test:unit":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - source ./venv/bin/activate && pytest tests/unit_tests -v && deactivate
+    silent: false
+
+  "test:integration":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - source ./venv/bin/activate && pytest tests/integration_tests -v && deactivate
+    silent: false
+
+  "test:all":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - source ./venv/bin/activate && pytest tests -v --cov=src --cov-report=html && deactivate
+    silent: false
+
+  "test:watch":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - source ./venv/bin/activate && pytest-watch tests -v --clear && deactivate
+    silent: false
+
+  "format":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - source ./venv/bin/activate && black src tests && ruff check --fix src tests && deactivate
+    silent: false
+
+  "lint":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - source ./venv/bin/activate && ruff check src tests && mypy src --ignore-missing-imports && deactivate
+    silent: false
+
   "clean":
     cmds:
-      - rm -rf backend/build backend/lambda_deployment.zip
+      - docker stop scuz-patrol > /dev/null 2>&1 || true
+      - docker rm scuz-patrol > /dev/null 2>&1 || true
     silent: false

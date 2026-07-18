@@ -16,18 +16,6 @@ variable "function_name" {
   default     = "scuz-patrol-bot-dev"
 }
 
-variable "handler" {
-  description = "Lambda handler"
-  type        = string
-  default     = "src.handler.lambda_handler"
-}
-
-variable "runtime" {
-  description = "Lambda runtime"
-  type        = string
-  default     = "python3.11"
-}
-
 variable "timeout" {
   description = "Lambda timeout in seconds"
   type        = number

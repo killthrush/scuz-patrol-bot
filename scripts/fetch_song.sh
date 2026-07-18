@@ -6,7 +6,7 @@ set -euo pipefail
 
 CLIP_ID="${1:?usage: fetch_song.sh <clip_id> [local_name]}"
 LOCAL_NAME="${2:-$CLIP_ID}"
-CACHE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/songs"
+CACHE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.temp_cache/songs"
 
 mkdir -p "$CACHE_DIR"
 

@@ -38,3 +38,4 @@ lambda_deployment.zip
 
 # Caches (temp data)
 .temp_cache/
+songs/

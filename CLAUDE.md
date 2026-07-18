@@ -120,7 +120,14 @@ If a test fails, fix it. Don't move forward with broken tests. See `backend/TEST
 
 Infrastructure is deployed to AWS (dev environment) via Terraform.
 
-**To complete setup**, populate secrets via `task set-secrets:dev` with your credentials in the environment.
+**To complete setup**, populate secrets in AWS Secrets Manager:
+1. Add your credentials to `.env` file (never commit):
+   ```
+   DISCORD_BOT_TOKEN=...
+   ANTHROPIC_API_KEY=...
+   GOOGLE_SERVICE_ACCOUNT_KEY='{"type":"service_account",...}'
+   ```
+2. Run `task set-secrets:dev` — automatically loads `.env` and pushes to Secrets Manager
 
 ## Known decisions
 

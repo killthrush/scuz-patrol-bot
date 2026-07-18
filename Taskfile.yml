@@ -46,14 +46,19 @@ tasks:
     silent: false
 
   "set-secrets:dev":
+    dir: "{{.USER_WORKING_DIR}}"
     cmds:
-      - echo "Setting Discord bot token..."
-      - aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/discord-token --secret-string "$DISCORD_BOT_TOKEN" --region us-east-1
-      - echo "Setting Anthropic API key..."
-      - aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/anthropic-api-key --secret-string "$ANTHROPIC_API_KEY" --region us-east-1
-      - echo "Setting Google service account key..."
-      - aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/google-service-account --secret-string "$GOOGLE_SERVICE_ACCOUNT_KEY" --region us-east-1
-      - echo "✓ Secrets updated in AWS Secrets Manager"
+      - |
+        set -a
+        source .env
+        set +a
+        echo "Setting Discord bot token..."
+        aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/discord-token --secret-string "$DISCORD_BOT_TOKEN" --region us-east-1
+        echo "Setting Anthropic API key..."
+        aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/anthropic-api-key --secret-string "$ANTHROPIC_API_KEY" --region us-east-1
+        echo "Setting Google service account key..."
+        aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/google-service-account --secret-string "$GOOGLE_SERVICE_ACCOUNT_KEY" --region us-east-1
+        echo "✓ Secrets updated in AWS Secrets Manager"
     silent: false
 
   "deploy:backend:dev":

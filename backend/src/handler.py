@@ -7,6 +7,7 @@ and either answers lore questions or writes to the canon Google Doc.
 import json
 import os
 import logging
+import boto3
 from typing import Any, Dict
 from dotenv import load_dotenv
 
@@ -19,6 +20,36 @@ load_dotenv()
 
 logger = logging.getLogger()
 logger.setLevel(os.getenv('LOG_LEVEL', 'INFO'))
+
+
+def _initialize_secrets() -> None:
+    """Fetch secrets from Secrets Manager and set as env vars.
+
+    Runs once at Lambda startup. If env vars already set (local testing),
+    skips Secrets Manager fetch. This ensures all code paths use env vars.
+    """
+    secrets = {
+        'ANTHROPIC_API_KEY': 'scuz-patrol-bot-dev/anthropic-api-key',
+        'DISCORD_BOT_TOKEN': 'scuz-patrol-bot-dev/discord-token',
+        'GOOGLE_SERVICE_ACCOUNT_KEY': 'scuz-patrol-bot-dev/google-service-account',
+    }
+
+    for env_var, secret_name in secrets.items():
+        # Skip if already set (local testing with .env)
+        if os.getenv(env_var):
+            continue
+
+        try:
+            client = boto3.client('secretsmanager', region_name='us-east-1')
+            response = client.get_secret_value(SecretId=secret_name)
+            os.environ[env_var] = response['SecretString']
+            logger.info(f"Loaded {env_var} from Secrets Manager")
+        except Exception as e:
+            logger.warning(f"Failed to load {env_var} from Secrets Manager: {e}")
+
+
+# Initialize secrets once at Lambda startup
+_initialize_secrets()
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:

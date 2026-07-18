@@ -21,7 +21,7 @@ class GoogleDocsClient:
         Args:
             service_account_key: Service account JSON (string or base64)
                 (defaults to GOOGLE_SERVICE_ACCOUNT_KEY env var,
-                 injected by AWS Secrets Manager Lambda Extension)
+                 populated by handler from Secrets Manager)
         """
         if service_account_key is None:
             service_account_key = os.getenv('GOOGLE_SERVICE_ACCOUNT_KEY')

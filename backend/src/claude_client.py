@@ -18,7 +18,7 @@ class ClaudeClient:
 
         Args:
             api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var,
-                     injected by AWS Secrets Manager Lambda Extension)
+                     populated by handler from Secrets Manager)
         """
         if api_key is None:
             api_key = os.getenv('ANTHROPIC_API_KEY')

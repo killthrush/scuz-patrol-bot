@@ -85,6 +85,9 @@ tasks:
   "test:integration":
     dir: "{{.USER_WORKING_DIR}}/backend"
     cmds:
+      - task build:backend
+      - task start:backend
+      - sleep 2
       - source ./venv/bin/activate && pytest tests/integration_tests.py -v && deactivate
     silent: false
 

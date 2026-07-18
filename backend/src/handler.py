@@ -27,6 +27,7 @@ def _initialize_secrets() -> None:
 
     Runs once at Lambda startup. If env vars already set (local testing),
     skips Secrets Manager fetch. This ensures all code paths use env vars.
+    Gracefully handles local testing where Secrets Manager is unavailable.
     """
     secrets = {
         'ANTHROPIC_API_KEY': 'scuz-patrol-bot-dev/anthropic-api-key',
@@ -43,9 +44,12 @@ def _initialize_secrets() -> None:
             client = boto3.client('secretsmanager', region_name='us-east-1')
             response = client.get_secret_value(SecretId=secret_name)
             os.environ[env_var] = response['SecretString']
-            logger.info(f"Loaded {env_var} from Secrets Manager")
+            logger.debug(f"Loaded {env_var} from Secrets Manager")
         except Exception as e:
-            logger.warning(f"Failed to load {env_var} from Secrets Manager: {e}")
+            # Gracefully skip if Secrets Manager is unavailable (local testing)
+            logger.debug(
+                f"Secrets Manager unavailable for {env_var} (expected in local testing): {e}"
+            )
 
 
 # Initialize secrets once at Lambda startup

@@ -28,3 +28,8 @@ output "log_group_name" {
   description = "CloudWatch Log Group name"
   value       = aws_cloudwatch_log_group.lambda_logs.name
 }
+
+output "manifest_bucket" {
+  description = "S3 bucket storing the Suno scrape manifest"
+  value       = aws_s3_bucket.manifest.bucket
+}

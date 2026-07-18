@@ -54,6 +54,11 @@ COMMANDS = [
             }
         ],
     },
+    {
+        "name": "refresh-songs",
+        "type": 1,
+        "description": "Check Suno for new songs and lore dropped by the band's accounts",
+    },
 ]
 
 

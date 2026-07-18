@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from src.discord_client import parse_discord_event, extract_message_from_event
 from src.claude_client import ClaudeClient
 from src.google_docs_client import GoogleDocsClient
+from src import suno_client
 
 # Load .env for local testing (no-op in Lambda)
 load_dotenv()
@@ -162,7 +163,7 @@ def _send_discord_followup(
     components: Optional[List[Any]] = None,
     embeds: Optional[List[Any]] = None,
 ) -> None:
-    """Send the real answer to Discord via the interaction follow-up webhook."""
+    """Edit the original deferred response via Discord's interaction follow-up webhook."""
     application_id = os.getenv('DISCORD_APPLICATION_ID')
     url = f"{DISCORD_API_BASE}/webhooks/{application_id}/{interaction_token}/messages/@original"
     payload: Dict[str, Any] = {"content": content}
@@ -175,6 +176,45 @@ def _send_discord_followup(
         response.raise_for_status()
     except Exception as e:
         logger.error(f"Failed to send Discord follow-up: {e}")
+
+
+def _send_discord_new_message(
+    interaction_token: str,
+    content: str,
+    components: Optional[List[Any]] = None,
+    embeds: Optional[List[Any]] = None,
+) -> None:
+    """Post an additional follow-up message (not editing the original deferred one)."""
+    application_id = os.getenv('DISCORD_APPLICATION_ID')
+    url = f"{DISCORD_API_BASE}/webhooks/{application_id}/{interaction_token}"
+    payload: Dict[str, Any] = {"content": content}
+    if components is not None:
+        payload["components"] = components
+    if embeds is not None:
+        payload["embeds"] = embeds
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+    except Exception as e:
+        logger.error(f"Failed to send Discord new message: {e}")
+
+
+def _self_invoke_async(source: str, payload_extra: Dict[str, Any]) -> None:
+    """Fire-and-forget self-invoke to do slow work outside Discord's 3s window."""
+    function_name = os.getenv('AWS_LAMBDA_FUNCTION_NAME')
+    if not function_name:
+        logger.warning(f"AWS_LAMBDA_FUNCTION_NAME not set; skipping {source} invocation (local testing?)")
+        return
+
+    try:
+        lambda_client = boto3.client('lambda')
+        lambda_client.invoke(
+            FunctionName=function_name,
+            InvocationType='Event',
+            Payload=json.dumps({'source': source, **payload_extra}).encode('utf-8'),
+        )
+    except Exception as e:
+        logger.error(f"Failed to invoke {source}: {e}")
 
 
 def _handle_async_worker(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -258,26 +298,11 @@ def _handle_component_interaction(parsed_event: Dict[str, Any]) -> Dict[str, Any
                 }),
             }
 
-        function_name = os.getenv('AWS_LAMBDA_FUNCTION_NAME')
-        if function_name:
-            try:
-                lambda_client = boto3.client('lambda')
-                lambda_client.invoke(
-                    FunctionName=function_name,
-                    InvocationType='Event',
-                    Payload=json.dumps({
-                        'source': 'discord_lore_worker',
-                        'text': parsed_lore['text'],
-                        'section': parsed_lore['section'],
-                        'interaction_token': interaction_token,
-                    }).encode('utf-8'),
-                )
-            except Exception as e:
-                logger.error(f"Failed to invoke lore worker: {e}")
-        else:
-            logger.warning(
-                "AWS_LAMBDA_FUNCTION_NAME not set; skipping lore worker invocation (local testing?)"
-            )
+        _self_invoke_async('discord_lore_worker', {
+            'text': parsed_lore['text'],
+            'section': parsed_lore['section'],
+            'interaction_token': interaction_token,
+        })
 
         return {
             "statusCode": 200,
@@ -295,32 +320,97 @@ def _handle_component_interaction(parsed_event: Dict[str, Any]) -> Dict[str, Any
 
 def _defer_and_process_async(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
     """Acknowledge the interaction immediately, do the real work asynchronously."""
-    function_name = os.getenv('AWS_LAMBDA_FUNCTION_NAME')
-
-    if function_name:
-        try:
-            lambda_client = boto3.client('lambda')
-            lambda_client.invoke(
-                FunctionName=function_name,
-                InvocationType='Event',
-                Payload=json.dumps({
-                    'source': 'discord_async_worker',
-                    'message': parsed_event.get('message'),
-                    'interaction_token': parsed_event.get('interaction_token'),
-                }).encode('utf-8'),
-            )
-        except Exception as e:
-            logger.error(f"Failed to invoke async worker: {e}")
-    else:
-        logger.warning(
-            "AWS_LAMBDA_FUNCTION_NAME not set; skipping async worker invocation (local testing?)"
-        )
+    _self_invoke_async('discord_async_worker', {
+        'message': parsed_event.get('message'),
+        'interaction_token': parsed_event.get('interaction_token'),
+    })
 
     return {
         "statusCode": 200,
         "headers": {"Content-Type": "application/json"},
         "body": json.dumps({"type": 5}),  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
     }
+
+
+def _defer_and_process_song_refresh(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
+    """Acknowledge /refresh-songs immediately, run the Suno check asynchronously."""
+    _self_invoke_async('discord_song_refresh_worker', {
+        'interaction_token': parsed_event.get('interaction_token'),
+    })
+
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"type": 5}),  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    }
+
+
+def _handle_song_refresh_worker(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Check Suno profiles for new lore drops, echoing and offering to confirm each one."""
+    interaction_token: Optional[str] = event.get('interaction_token')
+    if not interaction_token:
+        logger.error("Song refresh worker invoked without interaction_token")
+        return {"statusCode": 400}
+
+    try:
+        result = suno_client.refresh()
+    except Exception as e:
+        logger.error(f"Song refresh failed: {e}")
+        _send_discord_followup(interaction_token, "⚠️ Failed to check for new songs. Please try again.")
+        return {"statusCode": 200}
+
+    drops = result.get('new_lore_drops', [])
+    logger.info(
+        f"Song refresh: checked {result.get('profiles_checked')} profiles, "
+        f"{result.get('clips_checked')} clips, found {len(drops)} new lore drops"
+    )
+
+    if drops:
+        canon_doc: Optional[str] = None
+        claude: Optional[ClaudeClient] = None
+        try:
+            claude = ClaudeClient()
+            canon_doc = GoogleDocsClient().read_document()
+        except Exception as e:
+            logger.error(f"Failed to initialize clients for lore drop classification: {e}")
+
+        for drop in drops:
+            echo = (
+                f"🎵 New reply from **{drop['handle']}** on *{drop.get('title', 'a song')}*:\n"
+                f"> {drop['content']}"
+            )
+
+            intent = 'neither'
+            if claude is not None and canon_doc is not None:
+                try:
+                    intent_result = claude.classify_intent(drop['content'], canon_doc)
+                    intent = intent_result.get('intent', 'neither')
+                except Exception as e:
+                    logger.error(f"Failed to classify lore drop: {e}")
+                    intent_result = {}
+            else:
+                intent_result = {}
+
+            if intent == 'new_lore':
+                section = str(intent_result.get('suggested_section', 'Unexplored Ideas'))
+                lore_message = _build_lore_confirmation_message(drop['content'], section)
+                _send_discord_new_message(
+                    interaction_token,
+                    echo,
+                    embeds=lore_message['embeds'],
+                    components=lore_message['components'],
+                )
+            else:
+                _send_discord_new_message(interaction_token, echo)
+
+    plural = "s" if len(drops) != 1 else ""
+    summary = (
+        f"🔄 Checked {result.get('profiles_checked', 0)} profile(s), "
+        f"{result.get('clips_checked', 0)} song(s). "
+        f"Found {len(drops)} new lore drop{plural}."
+    )
+    _send_discord_followup(interaction_token, summary)
+    return {"statusCode": 200}
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -341,6 +431,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     if event.get('source') == 'discord_lore_worker':
         return _handle_lore_worker(event)
+
+    if event.get('source') == 'discord_song_refresh_worker':
+        return _handle_song_refresh_worker(event)
 
     try:
         logger.info(f"Received event: {json.dumps(event)}")
@@ -368,6 +461,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Handle button clicks (Confirm/Discard on a pending lore submission)
         if parsed_event.get('type') == 'component':
             return _handle_component_interaction(parsed_event)
+
+        # /refresh-songs takes no text option, so it can't go through the
+        # extract_message_from_event path below
+        if parsed_event.get('command_name') == 'refresh-songs':
+            return _defer_and_process_song_refresh(parsed_event)
 
         # Extract the user's message
         message = extract_message_from_event(parsed_event)

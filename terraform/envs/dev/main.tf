@@ -90,6 +90,29 @@ resource "aws_secretsmanager_secret" "discord_application_id" {
   description             = "Discord application ID for follow-up webhook calls"
 }
 
+# S3 bucket for the Suno scrape manifest (clip_id -> cached comment ids etc).
+# Lambda's /tmp isn't durable across invocations, so this is the only
+# reliable shared state for detecting new songs/comments between refreshes.
+resource "aws_s3_bucket" "manifest" {
+  bucket_prefix = "${var.function_name}-manifest-"
+  force_destroy = true
+}
+
+# IAM policy for the manifest bucket
+resource "aws_iam_role_policy" "lambda_manifest_bucket" {
+  name = "${var.function_name}-manifest-bucket-policy"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["s3:GetObject", "s3:PutObject"]
+      Resource = ["${aws_s3_bucket.manifest.arn}/*"]
+    }]
+  })
+}
+
 # ECR repository for Lambda container images
 resource "aws_ecr_repository" "bot" {
   name                 = "${var.function_name}-repo"
@@ -115,8 +138,9 @@ resource "aws_lambda_function" "bot" {
 
   environment {
     variables = {
-      LOG_LEVEL     = "INFO"
-      GOOGLE_DOC_ID = var.google_doc_id
+      LOG_LEVEL       = "INFO"
+      GOOGLE_DOC_ID   = var.google_doc_id
+      MANIFEST_BUCKET = aws_s3_bucket.manifest.bucket
     }
   }
 

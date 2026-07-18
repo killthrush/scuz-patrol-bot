@@ -19,11 +19,11 @@ class TestParseDiscordEvent:
         assert "respond_with" in parsed
 
     def test_parses_command_event(self):
-        """APPLICATION_COMMAND (type=3) should return command type."""
+        """APPLICATION_COMMAND (type=2) should return command type."""
         event = {
             "headers": {},
             "body": json.dumps({
-                "type": 3,
+                "type": 2,
                 "id": "interaction_123",
                 "token": "token_abc",
                 "guild_id": "guild_456",
@@ -43,7 +43,7 @@ class TestParseDiscordEvent:
         event = {
             "headers": {},
             "body": json.dumps({
-                "type": 3,
+                "type": 2,
                 "id": "int_1",
                 "token": "tok_1",
                 "guild_id": "guild_123",

@@ -115,6 +115,30 @@ class TestClassifyIntent:
 
         assert result["intent"] == "neither"
 
+    def test_strips_markdown_code_fences(self, monkeypatch, mock_anthropic):
+        """Should parse JSON even when wrapped in markdown code fences."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
+
+        response_text = '```json\n{"intent": "question", "confidence": 0.9, "reasoning": "asking"}\n```'
+        mock_response = Mock()
+        mock_response.content = [Mock(text=response_text)]
+        mock_response.usage = Mock(
+            input_tokens=100,
+            output_tokens=50,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+
+        mock_client = Mock()
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic.return_value = mock_client
+
+        client = ClaudeClient(api_key="test_key")
+        result = client.classify_intent("What is Scuz?", "Scuz is a band...")
+
+        assert result["intent"] == "question"
+        assert result["confidence"] == 0.9
+
     def test_handles_invalid_json_response(self, monkeypatch, mock_anthropic):
         """Should handle malformed JSON from Claude."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")

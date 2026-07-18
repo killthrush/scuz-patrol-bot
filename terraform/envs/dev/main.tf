@@ -37,7 +37,24 @@ resource "aws_iam_role_policy" "lambda_secrets" {
         aws_secretsmanager_secret.anthropic_api_key.arn,
         aws_secretsmanager_secret.google_service_account.arn,
         aws_secretsmanager_secret.discord_public_key.arn,
+        aws_secretsmanager_secret.discord_application_id.arn,
       ]
+    }]
+  })
+}
+
+# IAM policy allowing the Lambda to asynchronously invoke itself
+# (used to process slash commands outside Discord's 3s response window)
+resource "aws_iam_role_policy" "lambda_self_invoke" {
+  name = "${var.function_name}-self-invoke-policy"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["lambda:InvokeFunction"]
+      Resource = [aws_lambda_function.bot.arn]
     }]
   })
 }
@@ -67,6 +84,12 @@ resource "aws_secretsmanager_secret" "discord_public_key" {
   description             = "Discord public key for interaction signature verification"
 }
 
+resource "aws_secretsmanager_secret" "discord_application_id" {
+  name                    = "${var.function_name}/discord-application-id"
+  recovery_window_in_days = 7
+  description             = "Discord application ID for follow-up webhook calls"
+}
+
 # ECR repository for Lambda container images
 resource "aws_ecr_repository" "bot" {
   name                 = "${var.function_name}-repo"
@@ -85,19 +108,42 @@ resource "aws_lambda_function" "bot" {
   timeout       = var.timeout
   memory_size   = var.memory_size
   architectures = ["x86_64"]
+  publish       = true
 
   image_uri    = "${aws_ecr_repository.bot.repository_url}:latest"
   package_type = "Image"
 
   environment {
     variables = {
-      LOG_LEVEL = "INFO"
+      LOG_LEVEL     = "INFO"
+      GOOGLE_DOC_ID = var.google_doc_id
     }
   }
 
   depends_on = [
     aws_iam_role_policy_attachment.lambda_logs
   ]
+}
+
+# Alias that Discord's webhook actually calls. Deploys move this alias to
+# point at the newly published version so provisioned concurrency below
+# stays warm across code updates (see task deploy:backend:dev).
+resource "aws_lambda_alias" "live" {
+  name             = "live"
+  function_name    = aws_lambda_function.bot.function_name
+  function_version = aws_lambda_function.bot.version
+
+  lifecycle {
+    ignore_changes = [function_version]
+  }
+}
+
+# Keeps one instance warm so the initial Discord interaction response
+# (required within 3s) doesn't get stuck behind a container cold start.
+resource "aws_lambda_provisioned_concurrency_config" "live" {
+  function_name                     = aws_lambda_function.bot.function_name
+  qualifier                         = aws_lambda_alias.live.name
+  provisioned_concurrent_executions = var.provisioned_concurrency
 }
 
 # API Gateway to receive Discord webhooks
@@ -113,13 +159,14 @@ resource "aws_apigatewayv2_stage" "webhook" {
   auto_deploy = true
 }
 
-# API Gateway integration with Lambda
+# API Gateway integration with Lambda (targets the "live" alias so
+# provisioned concurrency applies to incoming webhook traffic)
 resource "aws_apigatewayv2_integration" "lambda" {
   api_id           = aws_apigatewayv2_api.webhook.id
   integration_type = "AWS_PROXY"
   integration_method = "POST"
   payload_format_version = "2.0"
-  integration_uri = aws_lambda_function.bot.invoke_arn
+  integration_uri = aws_lambda_alias.live.invoke_arn
 }
 
 # API Gateway route
@@ -129,11 +176,12 @@ resource "aws_apigatewayv2_route" "webhook" {
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 
-# Lambda permission for API Gateway
+# Lambda permission for API Gateway (granted on the alias, matching the integration above)
 resource "aws_lambda_permission" "api_gateway" {
   statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.bot.function_name
+  qualifier     = aws_lambda_alias.live.name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.webhook.execution_arn}/*/*"
 }

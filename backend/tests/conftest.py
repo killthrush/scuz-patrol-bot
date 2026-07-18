@@ -25,11 +25,11 @@ def discord_ping_event() -> Dict[str, Any]:
 
 @pytest.fixture
 def discord_command_event(monkeypatch) -> Dict[str, Any]:
-    """Discord slash command event (type=3, APPLICATION_COMMAND)."""
+    """Discord slash command event (type=2, APPLICATION_COMMAND)."""
     return {
         "headers": {},
         "body": json.dumps({
-            "type": 3,  # APPLICATION_COMMAND
+            "type": 2,  # APPLICATION_COMMAND
             "id": "interaction_id_123",
             "token": "interaction_token_abc",
             "guild_id": "1482164431528923170",
@@ -61,7 +61,7 @@ def discord_lore_event() -> Dict[str, Any]:
     return {
         "headers": {},
         "body": json.dumps({
-            "type": 3,  # APPLICATION_COMMAND
+            "type": 2,  # APPLICATION_COMMAND
             "id": "interaction_id_456",
             "token": "interaction_token_def",
             "guild_id": "1482164431528923170",

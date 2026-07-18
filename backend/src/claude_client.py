@@ -27,7 +27,7 @@ class ClaudeClient:
             raise ValueError("ANTHROPIC_API_KEY not set")
 
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = "claude-3-5-sonnet-20241022"
+        self.model = "claude-haiku-4-5-20251001"
 
     def classify_intent(
         self,
@@ -102,8 +102,13 @@ Respond with JSON matching this schema:
                 ],
             )
 
-            # Parse the JSON response
+            # Parse the JSON response, stripping markdown code fences if present
             response_text = response.content[0].text.strip()
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+                response_text = response_text.strip()
             try:
                 result = json.loads(response_text)
             except json.JSONDecodeError:

@@ -33,22 +33,24 @@ class TestMessageParsing:
     """Test Discord event parsing and message extraction."""
 
     def test_extracts_message_from_command(self, lambda_client, discord_command_event):
-        """Extract user's question from slash command."""
+        """A valid command should get an immediate deferred ack (type 5).
+
+        The real classification work happens in an async self-invocation,
+        which isn't triggered locally (no AWS_LAMBDA_FUNCTION_NAME in the
+        local container) — see unit tests for that logic.
+        """
         response = lambda_client.invoke(discord_command_event)
 
-        assert response["statusCode"] in [200, 500]  # May fail on API calls
+        assert response["statusCode"] == 200
         body = lambda_client.get_body(response)
-
-        # If the API calls fail, we'll get an error response
-        # But the message should have been extracted
-        assert "intent" in body or "error" in body
+        assert body.get("type") == 5
 
     def test_handles_missing_message(self, lambda_client):
         """When no message in event, return 400."""
         event = {
             "headers": {},
             "body": json.dumps({
-                "type": 3,
+                "type": 2,
                 "id": "test",
                 "token": "test",
                 "guild_id": "123",
@@ -101,28 +103,29 @@ class TestHandlerErrorHandling:
 
 
 class TestClassificationFlow:
-    """Test the intent classification flow (when APIs are mocked)."""
+    """Test the deferred-ack flow for command interactions.
 
-    def test_responds_to_question(self, lambda_client, discord_command_event, monkeypatch):
-        """Question event should attempt classification."""
-        # Note: This will fail without mocking Claude/Google APIs
-        # See unit_tests for mocked versions
+    Actual classification (Claude + Google Docs) happens in an async
+    self-invocation not exercised by local integration tests — see
+    unit_tests/test_handler.py::TestAsyncWorkerProcessing for that.
+    """
+
+    def test_responds_to_question(self, lambda_client, discord_command_event):
+        """Question command should get a deferred ack."""
         response = lambda_client.invoke(discord_command_event)
 
-        # Just verify we got a response structure
         assert "statusCode" in response
         assert "body" in response
 
         body = lambda_client.get_body(response)
-        assert "intent" in body or "error" in body
+        assert body.get("type") == 5
 
     def test_responds_with_valid_structure(self, lambda_client, discord_command_event):
-        """Response should always have intent or error."""
+        """Response should always be a valid deferred-ack payload."""
         response = lambda_client.invoke(discord_command_event)
         body = lambda_client.get_body(response)
 
-        # Must contain either intent classification or error
-        assert "intent" in body or "error" in body
+        assert body.get("type") == 5
 
 
 class TestHTTPResponses:

@@ -114,8 +114,8 @@ def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
             'respond_with': {'type': 1}  # PING response
         }
 
-    # Handle MESSAGE_CREATE or APPLICATION_COMMAND events
-    if payload.get('type') == 3:  # APPLICATION_COMMAND
+    # Handle APPLICATION_COMMAND events (slash commands)
+    if payload.get('type') == 2:  # APPLICATION_COMMAND
         interaction = payload.get('data', {})
         user = payload.get('member', {}).get('user', {})
 

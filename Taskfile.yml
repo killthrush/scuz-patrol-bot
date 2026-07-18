@@ -60,16 +60,25 @@ tasks:
         aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/google-service-account --secret-string "$GOOGLE_SERVICE_ACCOUNT_KEY" --region us-east-1
         echo "Setting Discord public key..."
         aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/discord-public-key --secret-string "$DISCORD_PUBLIC_KEY" --region us-east-1
+        echo "Setting Discord application ID..."
+        aws secretsmanager put-secret-value --secret-id scuz-patrol-bot-dev/discord-application-id --secret-string "$DISCORD_APPLICATION_ID" --region us-east-1
         echo "✓ Secrets updated in AWS Secrets Manager"
     silent: false
 
   "deploy:backend:dev":
+    desc: "Push image, update Lambda code, publish a version, and move the 'live' alias to it"
     dir: "{{.USER_WORKING_DIR}}"
     cmds:
       - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin {{.REPO_URL}}
       - docker tag scuz-patrol:latest {{.REPO_URL}}:latest
       - docker push {{.REPO_URL}}:latest
       - aws lambda update-function-code --function-name {{.FUNCTION_NAME}} --image-uri {{.REPO_URL}}:latest
+      - |
+        aws lambda wait function-updated --function-name {{.FUNCTION_NAME}}
+        VERSION=$(aws lambda publish-version --function-name {{.FUNCTION_NAME}} --query 'Version' --output text)
+        echo "Published version $VERSION"
+        aws lambda update-alias --function-name {{.FUNCTION_NAME}} --name live --function-version "$VERSION"
+        echo "Alias 'live' now points to version $VERSION (provisioned concurrency will re-warm in the background)"
     vars:
       REPO_URL:
         sh: task describe:infra:dev | jq -r '.image_repo.value.url'

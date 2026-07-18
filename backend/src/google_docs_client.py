@@ -9,6 +9,8 @@ from typing import Optional
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
+from src.secrets import get_google_service_account_key
+
 logger = logging.getLogger()
 
 
@@ -19,20 +21,19 @@ class GoogleDocsClient:
         """Initialize Google Docs client.
 
         Args:
-            service_account_key: Base64-encoded service account JSON
-                (defaults to GOOGLE_SERVICE_ACCOUNT_KEY env var)
+            service_account_key: Service account JSON (string or base64)
+                (defaults to Secrets Manager/GOOGLE_SERVICE_ACCOUNT_KEY env var)
         """
-        key_b64 = service_account_key or os.getenv('GOOGLE_SERVICE_ACCOUNT_KEY')
-        if not key_b64:
+        if service_account_key is None:
+            service_account_key = get_google_service_account_key()
+
+        if not service_account_key:
             raise ValueError("GOOGLE_SERVICE_ACCOUNT_KEY not set")
 
-        # Decode the base64 key
-        try:
-            key_json = base64.b64decode(key_b64).decode()
-            key_data = json.loads(key_json)
-        except Exception as e:
-            logger.error(f"Failed to decode service account key: {e}")
-            raise
+        # Handle both base64-encoded and plain JSON formats
+        key_data = self._parse_service_account_key(service_account_key)
+        if not key_data:
+            raise ValueError("Failed to parse service account key")
 
         # Create credentials scoped to Google Docs API
         self.credentials = Credentials.from_service_account_info(
@@ -44,6 +45,29 @@ class GoogleDocsClient:
         self.doc_id = os.getenv('GOOGLE_DOC_ID')
         if not self.doc_id:
             raise ValueError("GOOGLE_DOC_ID not set")
+
+    def _parse_service_account_key(self, key: str) -> Optional[dict]:
+        """Parse service account key from base64 or plain JSON.
+
+        Args:
+            key: Base64-encoded or plain JSON service account key
+
+        Returns:
+            Parsed key dict or None if parsing fails
+        """
+        # Try parsing as plain JSON first (from Secrets Manager)
+        try:
+            return json.loads(key)
+        except json.JSONDecodeError:
+            pass
+
+        # Try base64 decoding (from env var)
+        try:
+            key_json = base64.b64decode(key).decode()
+            return json.loads(key_json)
+        except Exception:
+            logger.error("Failed to parse service account key as JSON or base64")
+            return None
 
     def read_document(self) -> str:
         """Read the full canon compendium as plain text.

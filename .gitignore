@@ -39,3 +39,7 @@ lambda_deployment.zip
 # Caches (temp data)
 .temp_cache/
 songs/
+
+# Test artifacts
+.coverage
+htmlcov/

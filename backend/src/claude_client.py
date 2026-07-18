@@ -2,10 +2,11 @@
 
 import json
 import logging
-import os
 from typing import Any, Dict, Optional
 
 import anthropic
+
+from src.secrets import get_anthropic_api_key
 
 logger = logging.getLogger()
 
@@ -17,13 +18,15 @@ class ClaudeClient:
         """Initialize Claude client.
 
         Args:
-            api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
+            api_key: Anthropic API key (defaults to Secrets Manager/env var)
         """
-        self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
-        if not self.api_key:
+        if api_key is None:
+            api_key = get_anthropic_api_key()
+
+        if not api_key:
             raise ValueError("ANTHROPIC_API_KEY not set")
 
-        self.client = anthropic.Anthropic(api_key=self.api_key)
+        self.client = anthropic.Anthropic(api_key=api_key)
         self.model = "claude-3-5-sonnet-20241022"
 
     def classify_intent(

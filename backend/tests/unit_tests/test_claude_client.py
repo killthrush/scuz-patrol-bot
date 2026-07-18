@@ -21,7 +21,7 @@ class TestClaudeClientInit:
 
         client = ClaudeClient()
 
-        assert client.api_key == "test_key_123"
+        assert client.client is not None
         mock_anthropic.assert_called_once_with(api_key="test_key_123")
 
     def test_raises_error_without_api_key(self, monkeypatch):

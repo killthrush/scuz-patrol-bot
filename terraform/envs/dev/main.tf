@@ -20,6 +20,46 @@ resource "aws_iam_role_policy_attachment" "lambda_logs" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+# IAM policy for Secrets Manager access
+resource "aws_iam_role_policy" "lambda_secrets" {
+  name = "${var.function_name}-secrets-policy"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue"
+      ]
+      Resource = [
+        aws_secretsmanager_secret.discord_token.arn,
+        aws_secretsmanager_secret.anthropic_api_key.arn,
+        aws_secretsmanager_secret.google_service_account.arn,
+      ]
+    }]
+  })
+}
+
+# Secrets Manager secrets (populated via: task set-secrets:dev)
+resource "aws_secretsmanager_secret" "discord_token" {
+  name                    = "${var.function_name}/discord-token"
+  recovery_window_in_days = 7
+  description             = "Discord bot token for Scuz Patrol"
+}
+
+resource "aws_secretsmanager_secret" "anthropic_api_key" {
+  name                    = "${var.function_name}/anthropic-api-key"
+  recovery_window_in_days = 7
+  description             = "Anthropic API key for Claude"
+}
+
+resource "aws_secretsmanager_secret" "google_service_account" {
+  name                    = "${var.function_name}/google-service-account"
+  recovery_window_in_days = 7
+  description             = "Google service account key for Docs API"
+}
+
 # ECR repository for Lambda container images
 resource "aws_ecr_repository" "bot" {
   name                 = "${var.function_name}-repo"

@@ -74,13 +74,19 @@ tasks:
   "test:integration":
     dir: "{{.USER_WORKING_DIR}}/backend"
     cmds:
-      - source ./venv/bin/activate && pytest tests/integration_tests -v && deactivate
+      - source ./venv/bin/activate && pytest tests/integration_tests.py -v && deactivate
     silent: false
 
   "test:all":
     dir: "{{.USER_WORKING_DIR}}/backend"
     cmds:
       - source ./venv/bin/activate && pytest tests -v --cov=src --cov-report=html && deactivate
+    silent: false
+
+  "test:coverage":
+    dir: "{{.USER_WORKING_DIR}}/backend"
+    cmds:
+      - source ./venv/bin/activate && pytest tests -v --cov=src --cov-report=term-missing:skip-covered --cov-branch && deactivate
     silent: false
 
   "test:watch":

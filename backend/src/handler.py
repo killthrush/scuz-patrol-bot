@@ -10,9 +10,9 @@ import logging
 from typing import Any, Dict
 from dotenv import load_dotenv
 
-from discord_client import parse_discord_event, extract_message_from_event
-from claude_client import ClaudeClient
-from google_docs_client import GoogleDocsClient
+from src.discord_client import parse_discord_event, extract_message_from_event
+from src.claude_client import ClaudeClient
+from src.google_docs_client import GoogleDocsClient
 
 # Load .env for local testing (no-op in Lambda)
 load_dotenv()

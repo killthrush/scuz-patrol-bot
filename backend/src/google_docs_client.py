@@ -9,8 +9,6 @@ from typing import Optional
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-from src.secrets import get_google_service_account_key
-
 logger = logging.getLogger()
 
 
@@ -22,10 +20,11 @@ class GoogleDocsClient:
 
         Args:
             service_account_key: Service account JSON (string or base64)
-                (defaults to Secrets Manager/GOOGLE_SERVICE_ACCOUNT_KEY env var)
+                (defaults to GOOGLE_SERVICE_ACCOUNT_KEY env var,
+                 injected by AWS Secrets Manager Lambda Extension)
         """
         if service_account_key is None:
-            service_account_key = get_google_service_account_key()
+            service_account_key = os.getenv('GOOGLE_SERVICE_ACCOUNT_KEY')
 
         if not service_account_key:
             raise ValueError("GOOGLE_SERVICE_ACCOUNT_KEY not set")

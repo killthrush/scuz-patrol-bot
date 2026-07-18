@@ -79,14 +79,29 @@ resource "aws_lambda_function" "bot" {
   memory_size   = var.memory_size
   architectures = ["x86_64"]
 
-  image_uri = "${aws_ecr_repository.bot.repository_url}:latest"
+  image_uri    = "${aws_ecr_repository.bot.repository_url}:latest"
   package_type = "Image"
+
+  # AWS Secrets Manager Lambda Extension - injects secrets as env vars automatically
+  layers = [
+    "arn:aws:lambda:${var.aws_region}:177933569100:layer:AWS-Parameters-and-Secrets-Lambda-Extension:11"
+  ]
 
   environment {
     variables = {
       LOG_LEVEL = "INFO"
-      # Secrets stored in Lambda environment variables
-      # (In production, use Secrets Manager or Parameter Store)
+      # Extension automatically fetches these secrets and injects as env vars
+      SECRETS_MANAGER_CONFIG = jsonencode({
+        "DISCORD_BOT_TOKEN" : {
+          "path" : "scuz-patrol-bot-dev/discord-token"
+        },
+        "ANTHROPIC_API_KEY" : {
+          "path" : "scuz-patrol-bot-dev/anthropic-api-key"
+        },
+        "GOOGLE_SERVICE_ACCOUNT_KEY" : {
+          "path" : "scuz-patrol-bot-dev/google-service-account"
+        }
+      })
     }
   }
 

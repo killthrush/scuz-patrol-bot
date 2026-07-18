@@ -2,11 +2,10 @@
 
 import json
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import anthropic
-
-from src.secrets import get_anthropic_api_key
 
 logger = logging.getLogger()
 
@@ -18,10 +17,11 @@ class ClaudeClient:
         """Initialize Claude client.
 
         Args:
-            api_key: Anthropic API key (defaults to Secrets Manager/env var)
+            api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var,
+                     injected by AWS Secrets Manager Lambda Extension)
         """
         if api_key is None:
-            api_key = get_anthropic_api_key()
+            api_key = os.getenv('ANTHROPIC_API_KEY')
 
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY not set")

@@ -71,7 +71,13 @@ class TestParseDiscordEvent:
                 "channel_id": "channel_789",
                 "member": {"user": {"id": "user_111", "username": "testuser"}},
                 "data": {"custom_id": "lore_confirm"},
-                "message": {"content": "Section: Band Members\n---\nSome lore\n---\nConfirm?"},
+                "message": {
+                    "content": "",
+                    "embeds": [{"fields": [
+                        {"name": "Section", "value": "Band Members"},
+                        {"name": "Lore", "value": "Some lore"},
+                    ]}],
+                },
             }),
         }
         parsed = parse_discord_event(event)
@@ -79,7 +85,7 @@ class TestParseDiscordEvent:
         assert parsed["type"] == "component"
         assert parsed["custom_id"] == "lore_confirm"
         assert parsed["interaction_token"] == "token_xyz"
-        assert "Band Members" in parsed["message_content"]
+        assert parsed["message_embeds"][0]["fields"][0]["value"] == "Band Members"
 
     def test_component_event_defaults_missing_message(self):
         """Component events without a message body shouldn't crash."""
@@ -96,6 +102,7 @@ class TestParseDiscordEvent:
 
         assert parsed["type"] == "component"
         assert parsed["message_content"] == ""
+        assert parsed["message_embeds"] == []
 
 
 class TestExtractMessageFromEvent:

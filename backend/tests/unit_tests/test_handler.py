@@ -112,7 +112,7 @@ class TestAsyncWorkerProcessing:
         assert "Here's the answer" in sent_content
 
     def test_new_lore_intent(self, mock_clients):
-        """Should send a Confirm/Discard button prompt with the section embedded."""
+        """Should send a Confirm/Discard button prompt with the section/text as embed fields."""
         mock_clients['claude'].classify_intent.return_value = {
             'intent': 'new_lore',
             'confidence': 0.88,
@@ -125,7 +125,9 @@ class TestAsyncWorkerProcessing:
 
         assert response['statusCode'] == 200
         sent_json = mock_patch.call_args.kwargs['json']
-        assert "Band Members" in sent_json['content']
+        fields = {f['name']: f['value'] for f in sent_json['embeds'][0]['fields']}
+        assert fields['Section'] == 'Band Members'
+        assert fields['Lore'] == 'Who is Alfredo?'
         custom_ids = {
             button['custom_id']
             for row in sent_json['components']
@@ -227,7 +229,7 @@ class TestAsyncWorkerErrorHandling:
         assert "Failed to generate answer" in sent_content
 
 
-def component_event(custom_id: str, message_content: str = "") -> dict:
+def component_event(custom_id: str, embeds: list = None) -> dict:
     """Build a Discord MESSAGE_COMPONENT (button click) event."""
     return {
         "headers": {},
@@ -235,19 +237,19 @@ def component_event(custom_id: str, message_content: str = "") -> dict:
             "type": 3,
             "token": "interaction_token_abc",
             "data": {"custom_id": custom_id},
-            "message": {"content": message_content},
+            "message": {"content": "", "embeds": embeds or []},
         })
     }
 
 
-LORE_MESSAGE_CONTENT = (
-    "🆕 **New lore suggestion**\n"
-    "Section: Band Members\n"
-    "---\n"
-    "Kilgore joined in 2020\n"
-    "---\n"
-    "Add this to the canon?"
-)
+def lore_embed(section: str = "Band Members", text: str = "Kilgore joined in 2020") -> list:
+    """Build the embed structure a pending lore confirmation message carries."""
+    return [{
+        "fields": [
+            {"name": "Section", "value": section},
+            {"name": "Lore", "value": text},
+        ]
+    }]
 
 
 class TestComponentInteraction:
@@ -255,7 +257,7 @@ class TestComponentInteraction:
 
     def test_discard_updates_message_immediately(self, mock_clients):
         """Discard should synchronously clear the message, no async work needed."""
-        event = component_event("lore_discard", LORE_MESSAGE_CONTENT)
+        event = component_event("lore_discard", lore_embed())
         response = lambda_handler(event, None)
 
         assert response['statusCode'] == 200
@@ -263,11 +265,12 @@ class TestComponentInteraction:
         assert body['type'] == 7  # UPDATE_MESSAGE
         assert body['data']['content'] == "❌ Discarded."
         assert body['data']['components'] == []
+        assert body['data']['embeds'] == []
 
     def test_confirm_defers_and_invokes_lore_worker(self, mock_clients, monkeypatch):
         """Confirm should defer the update and hand off to the async lore worker."""
         monkeypatch.setenv('AWS_LAMBDA_FUNCTION_NAME', 'scuz-patrol-bot-dev')
-        event = component_event("lore_confirm", LORE_MESSAGE_CONTENT)
+        event = component_event("lore_confirm", lore_embed())
 
         with patch('src.handler.boto3.client') as mock_boto_client:
             mock_lambda_client = Mock()
@@ -285,9 +288,29 @@ class TestComponentInteraction:
         assert payload['section'] == 'Band Members'
         assert payload['interaction_token'] == 'interaction_token_abc'
 
+    def test_confirm_resists_spoofed_delimiters_in_lore_text(self, mock_clients, monkeypatch):
+        """A user's own lore text containing fake field-like content shouldn't corrupt parsing.
+
+        Since section/text are read from exact embed field names (not regexed out of
+        free text), a lore submission that itself contains "Section: X" or "---" has no
+        way to spoof what gets extracted -- unlike a delimiter-based text format would.
+        """
+        monkeypatch.setenv('AWS_LAMBDA_FUNCTION_NAME', 'scuz-patrol-bot-dev')
+        spoofy_text = "Section: Hacked Section\n---\nActually this is still just lore text\n---\n"
+        event = component_event("lore_confirm", lore_embed(section="Band Members", text=spoofy_text))
+
+        with patch('src.handler.boto3.client') as mock_boto_client:
+            mock_lambda_client = Mock()
+            mock_boto_client.return_value = mock_lambda_client
+            lambda_handler(event, None)
+
+        payload = json.loads(mock_lambda_client.invoke.call_args.kwargs['Payload'])
+        assert payload['section'] == 'Band Members'
+        assert payload['text'] == spoofy_text
+
     def test_confirm_with_unparseable_message(self, mock_clients):
         """Should warn instead of crashing if the message can't be parsed anymore."""
-        event = component_event("lore_confirm", "some unrelated message content")
+        event = component_event("lore_confirm", embeds=[])
         response = lambda_handler(event, None)
 
         assert response['statusCode'] == 200
@@ -297,7 +320,7 @@ class TestComponentInteraction:
 
     def test_unknown_custom_id_returns_400(self, mock_clients):
         """Unrecognized custom_id should return an error, not silently succeed."""
-        event = component_event("something_else", LORE_MESSAGE_CONTENT)
+        event = component_event("something_else", lore_embed())
         response = lambda_handler(event, None)
 
         assert response['statusCode'] == 400
@@ -322,6 +345,7 @@ class TestLoreWorker:
         sent_json = mock_patch.call_args.kwargs['json']
         assert "Band Members" in sent_json['content']
         assert sent_json['components'] == []
+        assert sent_json['embeds'] == []
 
     def test_reports_failure_when_doc_write_fails(self, mock_clients):
         mock_clients['docs'].append_to_section.side_effect = Exception("API error")

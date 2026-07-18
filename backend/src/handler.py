@@ -13,7 +13,6 @@ follow-up webhook.
 
 import json
 import os
-import re
 import logging
 import boto3
 import requests  # type: ignore
@@ -31,13 +30,6 @@ logger = logging.getLogger()
 logger.setLevel(os.getenv('LOG_LEVEL', 'INFO'))
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
-
-# Marks the lore text/section embedded in a pending confirmation message, so a
-# later button click can recover them without needing external state storage.
-LORE_MESSAGE_PATTERN = re.compile(
-    r"Section: (?P<section>.+)\n---\n(?P<text>.*)\n---",
-    re.DOTALL,
-)
 
 
 def _initialize_secrets() -> None:
@@ -126,18 +118,19 @@ def _process_message(message: str) -> Dict[str, Any]:
 def _build_lore_confirmation_message(text: str, section: str) -> Dict[str, Any]:
     """Build a Discord message asking the user to confirm/discard new lore.
 
-    Embeds the lore text and section in the message content (delimited by
-    "---") so a later button click can recover them from the message itself,
-    without needing external state storage.
+    The lore text and section are stored as structured embed fields (not
+    interpolated into free text) so a later button click can recover them by
+    reading exact field values — no delimiter for a user's own submitted text
+    to spoof or corrupt, unlike parsing them back out of a formatted string.
     """
-    content = (
-        f"🆕 **New lore suggestion**\n"
-        f"Section: {section}\n"
-        f"---\n"
-        f"{text}\n"
-        f"---\n"
-        f"Add this to the canon?"
-    )
+    embed = {
+        "title": "🆕 New lore suggestion",
+        "description": "Add this to the canon?",
+        "fields": [
+            {"name": "Section", "value": section},
+            {"name": "Lore", "value": text},
+        ],
+    }
     components = [
         {
             "type": 1,  # ACTION_ROW
@@ -147,22 +140,27 @@ def _build_lore_confirmation_message(text: str, section: str) -> Dict[str, Any]:
             ],
         }
     ]
-    return {"content": content, "components": components}
+    return {"content": "", "embeds": [embed], "components": components}
 
 
-def _parse_lore_message(content: str) -> Optional[Dict[str, str]]:
-    """Recover the lore text and section embedded in a confirmation message."""
-    match = LORE_MESSAGE_PATTERN.search(content)
-    if not match:
+def _parse_lore_message(embeds: List[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    """Recover the lore text and section stored in a confirmation message's embed."""
+    if not embeds:
         return None
-    return {
-        "section": match.group("section").strip(),
-        "text": match.group("text").strip(),
-    }
+
+    fields = {f.get("name"): f.get("value") for f in embeds[0].get("fields", [])}
+    section = fields.get("Section")
+    text = fields.get("Lore")
+    if not section or not text:
+        return None
+    return {"section": section, "text": text}
 
 
 def _send_discord_followup(
-    interaction_token: str, content: str, components: Optional[List[Any]] = None
+    interaction_token: str,
+    content: str,
+    components: Optional[List[Any]] = None,
+    embeds: Optional[List[Any]] = None,
 ) -> None:
     """Send the real answer to Discord via the interaction follow-up webhook."""
     application_id = os.getenv('DISCORD_APPLICATION_ID')
@@ -170,6 +168,8 @@ def _send_discord_followup(
     payload: Dict[str, Any] = {"content": content}
     if components is not None:
         payload["components"] = components
+    if embeds is not None:
+        payload["embeds"] = embeds
     try:
         response = requests.patch(url, json=payload, timeout=10)
         response.raise_for_status()
@@ -191,7 +191,12 @@ def _handle_async_worker(event: Dict[str, Any]) -> Dict[str, Any]:
     if result.get('intent') == 'new_lore':
         section = str(result.get('suggested_section', 'Unexplored Ideas'))
         lore_message = _build_lore_confirmation_message(message, section)
-        _send_discord_followup(interaction_token, lore_message['content'], lore_message['components'])
+        _send_discord_followup(
+            interaction_token,
+            lore_message['content'],
+            components=lore_message['components'],
+            embeds=lore_message['embeds'],
+        )
         return {"statusCode": 200}
 
     reply: str = str(result.get('content') or result.get('error', 'Something went wrong.'))
@@ -218,7 +223,7 @@ def _handle_lore_worker(event: Dict[str, Any]) -> Dict[str, Any]:
         logger.error(f"Failed to write lore to canon doc: {e}")
         content = "⚠️ Failed to save this to the canon doc. Please try again."
 
-    _send_discord_followup(interaction_token, content, components=[])
+    _send_discord_followup(interaction_token, content, components=[], embeds=[])
     return {"statusCode": 200}
 
 
@@ -233,12 +238,12 @@ def _handle_component_interaction(parsed_event: Dict[str, Any]) -> Dict[str, Any
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps({
                 "type": 7,  # UPDATE_MESSAGE
-                "data": {"content": "❌ Discarded.", "components": []},
+                "data": {"content": "❌ Discarded.", "components": [], "embeds": []},
             }),
         }
 
     if custom_id == 'lore_confirm':
-        parsed_lore = _parse_lore_message(parsed_event.get('message_content', ''))
+        parsed_lore = _parse_lore_message(parsed_event.get('message_embeds', []))
         if not parsed_lore:
             return {
                 "statusCode": 200,
@@ -248,6 +253,7 @@ def _handle_component_interaction(parsed_event: Dict[str, Any]) -> Dict[str, Any
                     "data": {
                         "content": "⚠️ Couldn't read this submission anymore. Please try /lore again.",
                         "components": [],
+                        "embeds": [],
                     },
                 }),
             }

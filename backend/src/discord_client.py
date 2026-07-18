@@ -147,6 +147,7 @@ def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
             'user_name': user.get('username'),
             'custom_id': interaction.get('custom_id'),
             'message_content': message.get('content', ''),
+            'message_embeds': message.get('embeds', []),
         }
 
     # Fallback for unknown event types

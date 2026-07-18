@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild manifest.json from the songs/ cache.
+"""Rebuild manifest.json from the .temp_cache/songs/ cache.
 
 Indexes clip_id -> {local_name, title, handle, created_at, comment_count,
 cached_comment_ids}. cached_comment_ids includes BOTH top-level comment ids
@@ -12,8 +12,9 @@ import json
 import os
 import glob
 
-CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "songs")
-MANIFEST_PATH = os.path.join(os.path.dirname(CACHE_DIR), "manifest.json")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CACHE_DIR = os.path.join(REPO_ROOT, ".temp_cache", "songs")
+MANIFEST_PATH = os.path.join(REPO_ROOT, ".temp_cache", "manifest.json")
 
 
 def main():

@@ -18,7 +18,7 @@ import sys
 import subprocess
 
 MANIFEST_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "manifest.json"
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".temp_cache", "manifest.json"
 )
 
 
@@ -41,8 +41,11 @@ def main():
         print("usage: check_profile.py <handle> [<handle> ...]", file=sys.stderr)
         sys.exit(1)
 
-    with open(MANIFEST_PATH) as f:
-        manifest = json.load(f)
+    if os.path.exists(MANIFEST_PATH):
+        with open(MANIFEST_PATH) as f:
+            manifest = json.load(f)
+    else:
+        manifest = {}
 
     for handle in handles:
         profile = fetch_profile(handle)

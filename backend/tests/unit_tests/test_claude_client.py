@@ -98,7 +98,11 @@ class TestClassifyIntent:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
-        mock_response.content = [Mock(text='{"intent": "neither", "confidence": 0.92, "reasoning": "off-topic"}')]
+        mock_response.content = [
+            Mock(
+                text='{"intent": "neither", "confidence": 0.92, "reasoning": "off-topic"}'
+            )
+        ]
         mock_response.usage = Mock(
             input_tokens=100,
             output_tokens=50,
@@ -139,14 +143,21 @@ class TestClassifyIntent:
         assert result["intent"] == "question"
         assert result["confidence"] == 0.9
 
-    def test_wraps_user_message_and_canon_in_delimiter_tags(self, monkeypatch, mock_anthropic):
+    def test_wraps_user_message_and_canon_in_delimiter_tags(
+        self, monkeypatch, mock_anthropic
+    ):
         """User input and canon doc must be clearly delimited as data, not instructions."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
-        mock_response.content = [Mock(text='{"intent": "neither", "confidence": 0.5, "reasoning": "n/a"}')]
+        mock_response.content = [
+            Mock(text='{"intent": "neither", "confidence": 0.5, "reasoning": "n/a"}')
+        ]
         mock_response.usage = Mock(
-            input_tokens=1, output_tokens=1, cache_creation_input_tokens=0, cache_read_input_tokens=0
+            input_tokens=1,
+            output_tokens=1,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
         )
         mock_client = Mock()
         mock_client.messages.create.return_value = mock_response
@@ -185,7 +196,10 @@ class TestClassifyIntent:
 
         # Should return error classification
         assert result["intent"] == "neither"
-        assert "error" in result.get("reasoning", "").lower() or result.get("confidence") == 0.0
+        assert (
+            "error" in result.get("reasoning", "").lower()
+            or result.get("confidence") == 0.0
+        )
 
 
 class TestAnswerQuestion:
@@ -234,17 +248,23 @@ class TestAnswerQuestion:
         mock_anthropic.return_value = mock_client
 
         client = ClaudeClient(api_key="test_key")
-        answer = client.answer_question("When did Scuz release their first album?", "canon content")
+        answer = client.answer_question(
+            "When did Scuz release their first album?", "canon content"
+        )
 
         assert "Discography" in answer or "album" in answer.lower()
 
-    def test_wraps_question_and_canon_in_delimiter_tags(self, monkeypatch, mock_anthropic):
+    def test_wraps_question_and_canon_in_delimiter_tags(
+        self, monkeypatch, mock_anthropic
+    ):
         """User question and canon doc must be clearly delimited as data, not instructions."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
         mock_response.content = [Mock(text="An answer.")]
-        mock_response.usage = Mock(input_tokens=1, output_tokens=1, cache_read_input_tokens=0)
+        mock_response.usage = Mock(
+            input_tokens=1, output_tokens=1, cache_read_input_tokens=0
+        )
         mock_client = Mock()
         mock_client.messages.create.return_value = mock_response
         mock_anthropic.return_value = mock_client

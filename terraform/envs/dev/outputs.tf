@@ -33,3 +33,13 @@ output "manifest_bucket" {
   description = "S3 bucket storing the Suno scrape manifest"
   value       = aws_s3_bucket.manifest.bucket
 }
+
+output "facts_table" {
+  description = "DynamoDB table storing atomic lore facts"
+  value       = aws_dynamodb_table.facts.name
+}
+
+output "song_queue" {
+  description = "SQS FIFO queue for per-song ingest processing"
+  value       = aws_sqs_queue.song_ingest.url
+}

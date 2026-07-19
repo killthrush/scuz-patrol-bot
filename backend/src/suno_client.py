@@ -1,17 +1,26 @@
 """Suno scraping client: finds new songs/lore drops from canon-voice profiles.
 
 Ports the local scripts/{check_profile,fetch_song,rebuild_manifest,dump_replies}.py
-pipeline into something callable from the Lambda. Two differences from the
-local scripts:
+pipeline into something callable from the Lambda. Differences from the local
+scripts:
 
 - Uses `requests` directly instead of shelling out to curl (Lambda's base
   image doesn't reliably have curl, and requests already works fine here).
-- The manifest lives in S3 instead of a local JSON file, since Lambda's /tmp
-  isn't durable across invocations.
+- Processing happens one song at a time, off an SQS queue (see handler.py's
+  song-queue worker) rather than fetching everything in one Lambda invocation.
+  Suno appears to rate-limit/flag entire IP ranges rather than just high
+  per-caller volume, so the fix isn't a smarter retry loop -- it's never
+  hammering the API from one invocation in the first place.
+- Each song gets its own JSON artifact in S3 (clip_id -> last-seen comment
+  ids/caption/lyrics) instead of one global manifest, so a bad or slow song
+  can't block/corrupt tracking for every other song.
 
 Canon-voice accounts frequently drop real worldbuilding lore as a REPLY to a
 fan comment rather than as a top-level comment -- see dump_replies.py's
-docstring. This module's new-lore detection follows the same pattern.
+docstring. This module's new-lore detection follows the same pattern, and
+also mines each clip's caption and "lyric box" (Suno bundles a written
+backstory blurb and the actual lyrics into one `metadata.prompt` field),
+since canon-voice accounts frequently hide lore there too.
 """
 
 import json
@@ -19,7 +28,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import boto3
 import requests  # type: ignore
@@ -30,7 +39,6 @@ SUNO_API_BASE = "https://studio-api-prod.suno.com/api"
 SUNO_HEADERS = {"User-Agent": "Mozilla/5.0"}
 REQUEST_TIMEOUT = 15
 MAX_RETRIES = 3
-CLIP_FETCH_CONCURRENCY = 3
 
 # Suno profiles that actually post songs -- these are the ones checked for
 # new clips. scuz_patrol is the band's account; alfredokilgore is an
@@ -43,7 +51,7 @@ PROFILE_HANDLES = {"scuz_patrol", "alfredokilgore"}
 # which profile's song they're replying under.
 CANON_HANDLES = {"scuz_patrol", "alfredokilgore", "metrivus", "killthrush", "lubonit84"}
 
-MANIFEST_KEY = "manifest.json"
+SONG_ARTIFACT_PREFIX = "songs/"
 
 
 def _get_json(url: str) -> Dict[str, Any]:
@@ -51,7 +59,7 @@ def _get_json(url: str) -> Dict[str, Any]:
     for attempt in range(MAX_RETRIES):
         response = requests.get(url, headers=SUNO_HEADERS, timeout=REQUEST_TIMEOUT)
         if response.status_code == 429 and attempt < MAX_RETRIES - 1:
-            wait = 2 ** attempt
+            wait = 2**attempt
             logger.warning(f"Rate limited fetching {url}, retrying in {wait}s")
             time.sleep(wait)
             continue
@@ -70,7 +78,7 @@ def fetch_profile(handle: str) -> Dict[str, Any]:
 
 
 def fetch_clip(clip_id: str) -> Dict[str, Any]:
-    """Fetch one clip's metadata."""
+    """Fetch one clip's metadata (title, caption, metadata.prompt, comment_count, ...)."""
     return _get_json(f"{SUNO_API_BASE}/clip/{clip_id}")
 
 
@@ -80,7 +88,12 @@ def fetch_comments(clip_id: str) -> Dict[str, Any]:
 
 
 def fetch_profiles_parallel(handles: Set[str]) -> Dict[str, Dict[str, Any]]:
-    """Fetch multiple Suno profiles concurrently. Skips (and logs) failures."""
+    """Fetch multiple Suno profiles concurrently. Skips (and logs) failures.
+
+    Only PROFILE_HANDLES (2 accounts) are ever fetched this way, so the
+    concurrency here is small and unrelated to per-song processing, which is
+    deliberately serialized (see handler.py's SQS song queue).
+    """
     results: Dict[str, Dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=len(handles) or 1) as executor:
         future_to_handle = {executor.submit(fetch_profile, h): h for h in handles}
@@ -93,44 +106,9 @@ def fetch_profiles_parallel(handles: Set[str]) -> Dict[str, Dict[str, Any]]:
     return results
 
 
-def find_flagged_clips(
-    profiles: Dict[str, Dict[str, Any]], manifest: Dict[str, Any]
+def extract_new_canon_replies(
+    comments: Dict[str, Any], seen_ids: Set[str]
 ) -> List[Dict[str, Any]]:
-    """Return clips that are new or whose live comment_count differs from the manifest."""
-    flagged = []
-    for handle, profile in profiles.items():
-        for clip in profile.get("clips", []):
-            clip_id = clip["id"]
-            live_count = clip.get("comment_count", 0)
-            cached = manifest.get(clip_id)
-            if cached is None:
-                flagged.append({"clip_id": clip_id, "handle": handle, "title": clip.get("title")})
-            elif live_count != cached.get("comment_count", 0):
-                flagged.append({"clip_id": clip_id, "handle": handle, "title": clip.get("title")})
-    return flagged
-
-
-def fetch_clip_data_parallel(clip_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Fetch clip metadata + comments for multiple clips concurrently."""
-    results: Dict[str, Dict[str, Any]] = {}
-    if not clip_ids:
-        return results
-
-    def _fetch_one(clip_id: str):
-        return clip_id, fetch_clip(clip_id), fetch_comments(clip_id)
-
-    with ThreadPoolExecutor(max_workers=min(len(clip_ids), CLIP_FETCH_CONCURRENCY)) as executor:
-        futures = [executor.submit(_fetch_one, cid) for cid in clip_ids]
-        for future in as_completed(futures):
-            try:
-                clip_id, clip, comments = future.result()
-                results[clip_id] = {"clip": clip, "comments": comments}
-            except Exception as e:
-                logger.error(f"Failed to fetch clip data: {e}")
-    return results
-
-
-def extract_new_canon_replies(comments: Dict[str, Any], seen_ids: Set[str]) -> List[Dict[str, Any]]:
     """Extract replies from canon-voice handles not already in `seen_ids`."""
     new_replies = []
     for comment in comments.get("results", []):
@@ -139,18 +117,20 @@ def extract_new_canon_replies(comments: Dict[str, Any], seen_ids: Set[str]) -> L
                 continue
             if reply["id"] in seen_ids:
                 continue
-            new_replies.append({
-                "reply_id": reply["id"],
-                "handle": reply.get("user_handle"),
-                "content": reply.get("content"),
-                "created_at": reply.get("created_at"),
-                "parent_content": comment.get("content"),
-            })
+            new_replies.append(
+                {
+                    "reply_id": reply["id"],
+                    "handle": reply.get("user_handle"),
+                    "content": reply.get("content"),
+                    "created_at": reply.get("created_at"),
+                    "parent_content": comment.get("content"),
+                }
+            )
     return new_replies
 
 
 def _all_comment_ids(comments: Dict[str, Any]) -> List[str]:
-    """Flatten top-level + nested reply comment ids (for the manifest cache)."""
+    """Flatten top-level + nested reply comment ids (for the song artifact cache)."""
     ids = []
     for comment in comments.get("results", []):
         ids.append(comment["id"])
@@ -159,92 +139,119 @@ def _all_comment_ids(comments: Dict[str, Any]) -> List[str]:
     return ids
 
 
-def load_manifest() -> Dict[str, Any]:
-    """Load the manifest from S3, or an empty dict if it doesn't exist yet."""
-    bucket = os.getenv('MANIFEST_BUCKET')
+def _song_artifact_key(clip_id: str) -> str:
+    return f"{SONG_ARTIFACT_PREFIX}{clip_id}.json"
+
+
+def load_song_artifact(clip_id: str) -> Dict[str, Any]:
+    """Load one song's tracking artifact from S3, or an empty dict if not seen before."""
+    bucket = os.getenv("MANIFEST_BUCKET")
     if not bucket:
         raise ValueError("MANIFEST_BUCKET not set")
 
-    s3 = boto3.client('s3')
+    s3 = boto3.client("s3")
     try:
-        response = s3.get_object(Bucket=bucket, Key=MANIFEST_KEY)
-        return json.loads(response['Body'].read())
+        response = s3.get_object(Bucket=bucket, Key=_song_artifact_key(clip_id))
+        return json.loads(response["Body"].read())
     except s3.exceptions.NoSuchKey:
         return {}
 
 
-def save_manifest(manifest: Dict[str, Any]) -> None:
-    """Save the manifest to S3."""
-    bucket = os.getenv('MANIFEST_BUCKET')
+def save_song_artifact(clip_id: str, artifact: Dict[str, Any]) -> None:
+    """Save one song's tracking artifact to S3."""
+    bucket = os.getenv("MANIFEST_BUCKET")
     if not bucket:
         raise ValueError("MANIFEST_BUCKET not set")
 
-    s3 = boto3.client('s3')
+    s3 = boto3.client("s3")
     s3.put_object(
         Bucket=bucket,
-        Key=MANIFEST_KEY,
-        Body=json.dumps(manifest, indent=2).encode('utf-8'),
+        Key=_song_artifact_key(clip_id),
+        Body=json.dumps(artifact, indent=2).encode("utf-8"),
     )
 
 
-def refresh(handles: Optional[Set[str]] = None) -> Dict[str, Any]:
-    """Check song-posting Suno profiles for new songs/lore drops.
+def mine_song_facts(
+    clip: Dict[str, Any], comments: Dict[str, Any], artifact: Dict[str, Any]
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Diff one song's live data against its last-seen artifact for candidate facts.
 
-    Fetches all profiles in parallel, diffs against the manifest to find only
-    what's new or changed, fetches those clips' full data in parallel, then
-    extracts new lore drops (replies from canon-voice handles not seen before).
-
-    Deliberately does NOT persist the manifest -- the caller should call
-    save_manifest() with the returned "manifest" only *after* successfully
-    handling new_lore_drops. Marking comment ids "seen" before they've
-    actually been surfaced would silently lose any drops not yet processed
-    if the caller crashes or times out midway (e.g. a large first-ever run
-    with far more drops than fit in one Lambda invocation).
+    Checks three sources: canon-voice comment replies (as before), the clip's
+    caption, and its "lyric box" (metadata.prompt -- Suno bundles a written
+    backstory blurb and the actual lyrics into this one field; not split
+    further here since the delimiter between them isn't reliable enough to
+    parse). Each candidate still needs classification by the caller (this
+    module has no Claude dependency) before being written to the fact store.
 
     Returns:
-        {
-            "profiles_checked": int,
-            "clips_checked": int,
-            "new_lore_drops": [{"clip_id", "title", "handle", "reply_id", "content",
-                                 "parent_content", "created_at"}],
-            "manifest": <updated manifest, not yet saved>,
-        }
+        (candidates, updated_artifact) where each candidate is
+        {"content", "handle", "source", "source_ref"} and updated_artifact
+        should be saved regardless of whether any candidate became a fact,
+        so unchanged content isn't re-checked on the next pass.
     """
-    handles = handles or PROFILE_HANDLES
-    manifest = load_manifest()
-    updated_manifest = dict(manifest)
+    clip_id = clip["id"]
+    candidates: List[Dict[str, Any]] = []
 
-    profiles = fetch_profiles_parallel(handles)
-    flagged = find_flagged_clips(profiles, manifest)
-    clip_data = fetch_clip_data_parallel([f["clip_id"] for f in flagged])
+    seen_ids = set(artifact.get("cached_comment_ids", []))
+    for reply in extract_new_canon_replies(comments, seen_ids):
+        candidates.append(
+            {
+                "content": reply["content"],
+                "handle": reply["handle"],
+                "source": "suno_reply",
+                "source_ref": reply["reply_id"],
+            }
+        )
 
-    new_lore_drops = []
-    for flag in flagged:
-        clip_id = flag["clip_id"]
-        data = clip_data.get(clip_id)
-        if not data:
-            continue
+    caption = clip.get("caption")
+    if caption and caption != artifact.get("caption"):
+        candidates.append(
+            {
+                "content": caption,
+                "handle": clip.get("handle"),
+                "source": "suno_caption",
+                "source_ref": clip_id,
+            }
+        )
 
-        clip = data["clip"]
-        comments = data["comments"]
+    lyrics = clip.get("metadata", {}).get("prompt")
+    if lyrics and lyrics != artifact.get("lyrics"):
+        candidates.append(
+            {
+                "content": lyrics,
+                "handle": clip.get("handle"),
+                "source": "suno_lyrics",
+                "source_ref": clip_id,
+            }
+        )
 
-        cached = manifest.get(clip_id, {})
-        seen_ids = set(cached.get("cached_comment_ids", []))
-
-        for reply in extract_new_canon_replies(comments, seen_ids):
-            new_lore_drops.append({"clip_id": clip_id, "title": clip.get("title"), **reply})
-
-        updated_manifest[clip_id] = {
-            "title": clip.get("title"),
-            "handle": clip.get("handle"),
-            "created_at": clip.get("created_at"),
-            "comment_count": clip.get("comment_count", 0),
-            "cached_comment_ids": _all_comment_ids(comments),
-        }
-
-    return {
-        "profiles_checked": len(profiles),
-        "clips_checked": len(flagged),
-        "new_lore_drops": new_lore_drops,
-        "manifest": updated_manifest,
+    updated_artifact = {
+        "title": clip.get("title"),
+        "handle": clip.get("handle"),
+        "comment_count": clip.get("comment_count", 0),
+        "cached_comment_ids": _all_comment_ids(comments),
+        "caption": caption,
+        "lyrics": lyrics,
     }
+
+    return candidates, updated_artifact
+
+
+def enqueue_song(clip_id: str, handle: str, title: Optional[str]) -> None:
+    """Enqueue one song for background ingest processing via the SQS song queue.
+
+    All messages share one MessageGroupId so the FIFO queue processes songs
+    strictly one at a time. MessageDeduplicationId is the clip_id so running
+    /refresh-songs twice in quick succession doesn't double-queue the same song.
+    """
+    queue_url = os.getenv("SONG_QUEUE_URL")
+    if not queue_url:
+        raise ValueError("SONG_QUEUE_URL not set")
+
+    sqs = boto3.client("sqs")
+    sqs.send_message(
+        QueueUrl=queue_url,
+        MessageBody=json.dumps({"clip_id": clip_id, "handle": handle, "title": title}),
+        MessageGroupId="songs",
+        MessageDeduplicationId=clip_id,
+    )

@@ -22,15 +22,17 @@ class TestParseDiscordEvent:
         """APPLICATION_COMMAND (type=2) should return command type."""
         event = {
             "headers": {},
-            "body": json.dumps({
-                "type": 2,
-                "id": "interaction_123",
-                "token": "token_abc",
-                "guild_id": "guild_456",
-                "channel_id": "channel_789",
-                "member": {"user": {"id": "user_111", "username": "testuser"}},
-                "data": {"name": "ask", "options": []},
-            }),
+            "body": json.dumps(
+                {
+                    "type": 2,
+                    "id": "interaction_123",
+                    "token": "token_abc",
+                    "guild_id": "guild_456",
+                    "channel_id": "channel_789",
+                    "member": {"user": {"id": "user_111", "username": "testuser"}},
+                    "data": {"name": "ask", "options": []},
+                }
+            ),
         }
         parsed = parse_discord_event(event)
 
@@ -42,15 +44,17 @@ class TestParseDiscordEvent:
         """Should extract all user and guild information."""
         event = {
             "headers": {},
-            "body": json.dumps({
-                "type": 2,
-                "id": "int_1",
-                "token": "tok_1",
-                "guild_id": "guild_123",
-                "channel_id": "channel_456",
-                "member": {"user": {"id": "user_789", "username": "alice"}},
-                "data": {"name": "cmd", "options": []},
-            }),
+            "body": json.dumps(
+                {
+                    "type": 2,
+                    "id": "int_1",
+                    "token": "tok_1",
+                    "guild_id": "guild_123",
+                    "channel_id": "channel_456",
+                    "member": {"user": {"id": "user_789", "username": "alice"}},
+                    "data": {"name": "cmd", "options": []},
+                }
+            ),
         }
         parsed = parse_discord_event(event)
 
@@ -63,22 +67,28 @@ class TestParseDiscordEvent:
         """MESSAGE_COMPONENT (type=3, button click) should return component type."""
         event = {
             "headers": {},
-            "body": json.dumps({
-                "type": 3,
-                "id": "interaction_999",
-                "token": "token_xyz",
-                "guild_id": "guild_456",
-                "channel_id": "channel_789",
-                "member": {"user": {"id": "user_111", "username": "testuser"}},
-                "data": {"custom_id": "lore_confirm"},
-                "message": {
-                    "content": "",
-                    "embeds": [{"fields": [
-                        {"name": "Section", "value": "Band Members"},
-                        {"name": "Lore", "value": "Some lore"},
-                    ]}],
-                },
-            }),
+            "body": json.dumps(
+                {
+                    "type": 3,
+                    "id": "interaction_999",
+                    "token": "token_xyz",
+                    "guild_id": "guild_456",
+                    "channel_id": "channel_789",
+                    "member": {"user": {"id": "user_111", "username": "testuser"}},
+                    "data": {"custom_id": "lore_confirm"},
+                    "message": {
+                        "content": "",
+                        "embeds": [
+                            {
+                                "fields": [
+                                    {"name": "Section", "value": "Band Members"},
+                                    {"name": "Lore", "value": "Some lore"},
+                                ]
+                            }
+                        ],
+                    },
+                }
+            ),
         }
         parsed = parse_discord_event(event)
 
@@ -91,12 +101,14 @@ class TestParseDiscordEvent:
         """Component events without a message body shouldn't crash."""
         event = {
             "headers": {},
-            "body": json.dumps({
-                "type": 3,
-                "id": "int_1",
-                "token": "tok_1",
-                "data": {"custom_id": "lore_discard"},
-            }),
+            "body": json.dumps(
+                {
+                    "type": 3,
+                    "id": "int_1",
+                    "token": "tok_1",
+                    "data": {"custom_id": "lore_discard"},
+                }
+            ),
         }
         parsed = parse_discord_event(event)
 
@@ -125,7 +137,11 @@ class TestExtractMessageFromEvent:
         event = {
             "type": "command",
             "command_options": [
-                {"type": 1, "name": "something", "value": "ignore"},  # type 1 is not string
+                {
+                    "type": 1,
+                    "name": "something",
+                    "value": "ignore",
+                },  # type 1 is not string
                 {"type": 3, "name": "question", "value": "extract me"},
             ],
         }

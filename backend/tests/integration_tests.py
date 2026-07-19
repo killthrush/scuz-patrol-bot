@@ -49,18 +49,20 @@ class TestMessageParsing:
         """When no message in event, return 400."""
         event = {
             "headers": {},
-            "body": json.dumps({
-                "type": 2,
-                "id": "test",
-                "token": "test",
-                "guild_id": "123",
-                "channel_id": "456",
-                "member": {"user": {"id": "789", "username": "test"}},
-                "data": {
-                    "name": "ask",
-                    "options": [],  # No options = no message
-                },
-            }),
+            "body": json.dumps(
+                {
+                    "type": 2,
+                    "id": "test",
+                    "token": "test",
+                    "guild_id": "123",
+                    "channel_id": "456",
+                    "member": {"user": {"id": "789", "username": "test"}},
+                    "data": {
+                        "name": "ask",
+                        "options": [],  # No options = no message
+                    },
+                }
+            ),
         }
         response = lambda_client.invoke(event)
 

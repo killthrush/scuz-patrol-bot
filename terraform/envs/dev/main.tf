@@ -122,6 +122,115 @@ resource "aws_iam_role_policy" "lambda_manifest_bucket" {
   })
 }
 
+# DynamoDB table: the durable ledger of atomic lore facts the canon doc gets
+# periodically reconstructed from. Facts are append-only -- a retcon
+# supersedes an old fact rather than overwriting it, so a bad doc rewrite
+# can never destroy the underlying source of truth.
+resource "aws_dynamodb_table" "facts" {
+  name         = "${var.function_name}-facts"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "fact_id"
+
+  attribute {
+    name = "fact_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "status"
+    type = "S"
+  }
+
+  attribute {
+    name = "ingested_at"
+    type = "S"
+  }
+
+  # Lets the rebuild job cheaply pull "all pending facts, oldest first"
+  # without a full table scan.
+  global_secondary_index {
+    name            = "status-ingested_at-index"
+    hash_key        = "status"
+    range_key       = "ingested_at"
+    projection_type = "ALL"
+  }
+}
+
+# IAM policy for the facts table
+resource "aws_iam_role_policy" "lambda_facts_table" {
+  name = "${var.function_name}-facts-table-policy"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "dynamodb:PutItem",
+        "dynamodb:GetItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:Query",
+      ]
+      Resource = [
+        aws_dynamodb_table.facts.arn,
+        "${aws_dynamodb_table.facts.arn}/index/*",
+      ]
+    }]
+  })
+}
+
+# Dead-letter queue for songs that fail to process repeatedly (e.g. a
+# persistently erroring Suno response) -- keeps a poison message from
+# retrying forever and eating into the queue's processing capacity.
+resource "aws_sqs_queue" "song_ingest_dlq" {
+  name       = "${var.function_name}-song-ingest-dlq.fifo"
+  fifo_queue = true
+}
+
+# FIFO queue with every message in a single group ("songs") so Lambda only
+# ever processes one song at a time, in enqueue order -- deliberately gentle
+# on Suno's API instead of the old in-process ThreadPoolExecutor + retry loop,
+# since Suno appears to rate-limit/flag whole IP ranges rather than just
+# high request volume from a single caller.
+resource "aws_sqs_queue" "song_ingest" {
+  name                       = "${var.function_name}-song-ingest.fifo"
+  fifo_queue                 = true
+  visibility_timeout_seconds = var.timeout
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.song_ingest_dlq.arn
+    maxReceiveCount     = 3
+  })
+}
+
+# Batch size 1 + a single message group already serializes processing, so no
+# scaling_config is needed to additionally cap concurrency.
+resource "aws_lambda_event_source_mapping" "song_ingest" {
+  event_source_arn = aws_sqs_queue.song_ingest.arn
+  function_name    = aws_lambda_function.bot.arn
+  batch_size       = 1
+}
+
+# IAM policy for the song ingest queue
+resource "aws_iam_role_policy" "lambda_song_queue" {
+  name = "${var.function_name}-song-queue-policy"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "sqs:SendMessage",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+      ]
+      Resource = [aws_sqs_queue.song_ingest.arn]
+    }]
+  })
+}
+
 # ECR repository for Lambda container images
 resource "aws_ecr_repository" "bot" {
   name                 = "${var.function_name}-repo"
@@ -150,6 +259,8 @@ resource "aws_lambda_function" "bot" {
       LOG_LEVEL       = "INFO"
       GOOGLE_DOC_ID   = var.google_doc_id
       MANIFEST_BUCKET = aws_s3_bucket.manifest.bucket
+      FACTS_TABLE     = aws_dynamodb_table.facts.name
+      SONG_QUEUE_URL  = aws_sqs_queue.song_ingest.url
     }
   }
 

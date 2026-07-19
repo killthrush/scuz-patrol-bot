@@ -10,6 +10,7 @@ from src import suno_client
 
 class FakeNoSuchKey(Exception):
     """Stand-in for boto3's s3.exceptions.NoSuchKey."""
+
     pass
 
 
@@ -77,7 +78,9 @@ class TestRateLimitRetry:
         import requests as real_requests
 
         rate_limited = Mock(status_code=429)
-        rate_limited.raise_for_status.side_effect = real_requests.exceptions.HTTPError("429")
+        rate_limited.raise_for_status.side_effect = real_requests.exceptions.HTTPError(
+            "429"
+        )
         mock_requests_get.return_value = rate_limited
 
         with pytest.raises(real_requests.exceptions.HTTPError):
@@ -94,7 +97,9 @@ class TestFetchProfilesParallel:
             return {"handle": handle, "clips": []}
 
         with patch("src.suno_client.fetch_profile", side_effect=fake_fetch):
-            results = suno_client.fetch_profiles_parallel({"scuz_patrol", "alfredokilgore"})
+            results = suno_client.fetch_profiles_parallel(
+                {"scuz_patrol", "alfredokilgore"}
+            )
 
         assert set(results.keys()) == {"scuz_patrol", "alfredokilgore"}
         assert results["scuz_patrol"]["handle"] == "scuz_patrol"
@@ -106,39 +111,12 @@ class TestFetchProfilesParallel:
             return {"handle": handle}
 
         with patch("src.suno_client.fetch_profile", side_effect=fake_fetch):
-            results = suno_client.fetch_profiles_parallel({"scuz_patrol", "broken_handle"})
+            results = suno_client.fetch_profiles_parallel(
+                {"scuz_patrol", "broken_handle"}
+            )
 
         assert "scuz_patrol" in results
         assert "broken_handle" not in results
-
-
-class TestFindFlaggedClips:
-    """Test diffing live profile data against the cached manifest."""
-
-    def test_flags_new_clip(self):
-        profiles = {"scuz_patrol": {"clips": [{"id": "clip1", "title": "Song", "comment_count": 3}]}}
-        manifest = {}
-
-        flagged = suno_client.find_flagged_clips(profiles, manifest)
-
-        assert len(flagged) == 1
-        assert flagged[0]["clip_id"] == "clip1"
-
-    def test_flags_clip_with_changed_comment_count(self):
-        profiles = {"scuz_patrol": {"clips": [{"id": "clip1", "title": "Song", "comment_count": 5}]}}
-        manifest = {"clip1": {"comment_count": 3}}
-
-        flagged = suno_client.find_flagged_clips(profiles, manifest)
-
-        assert len(flagged) == 1
-
-    def test_does_not_flag_unchanged_clip(self):
-        profiles = {"scuz_patrol": {"clips": [{"id": "clip1", "title": "Song", "comment_count": 3}]}}
-        manifest = {"clip1": {"comment_count": 3}}
-
-        flagged = suno_client.find_flagged_clips(profiles, manifest)
-
-        assert flagged == []
 
 
 class TestExtractNewCanonReplies:
@@ -151,7 +129,11 @@ class TestExtractNewCanonReplies:
                     "id": "c1",
                     "content": "love this song",
                     "replies": [
-                        {"id": "r1", "user_handle": "alfredokilgore", "content": "thanks, wrote it in 2020"}
+                        {
+                            "id": "r1",
+                            "user_handle": "alfredokilgore",
+                            "content": "thanks, wrote it in 2020",
+                        }
                     ],
                 }
             ]
@@ -170,7 +152,9 @@ class TestExtractNewCanonReplies:
                 {
                     "id": "c1",
                     "content": "cool",
-                    "replies": [{"id": "r1", "user_handle": "randomfan", "content": "yeah"}],
+                    "replies": [
+                        {"id": "r1", "user_handle": "randomfan", "content": "yeah"}
+                    ],
                 }
             ]
         }
@@ -182,7 +166,13 @@ class TestExtractNewCanonReplies:
     def test_ignores_already_seen_reply(self):
         comments = {
             "results": [
-                {"id": "c1", "content": "cool", "replies": [{"id": "r1", "user_handle": "metrivus", "content": "yeah"}]}
+                {
+                    "id": "c1",
+                    "content": "cool",
+                    "replies": [
+                        {"id": "r1", "user_handle": "metrivus", "content": "yeah"}
+                    ],
+                }
             ]
         }
 
@@ -191,116 +181,186 @@ class TestExtractNewCanonReplies:
         assert new_replies == []
 
 
-class TestManifestStorage:
-    """Test S3-backed manifest load/save."""
+class TestSongArtifactStorage:
+    """Test S3-backed per-song artifact load/save (one JSON object per clip_id)."""
 
-    def test_load_manifest_returns_parsed_json(self, monkeypatch):
+    def test_load_artifact_returns_parsed_json(self, monkeypatch):
         monkeypatch.setenv("MANIFEST_BUCKET", "test-bucket")
         mock_s3 = Mock()
         mock_body = Mock()
-        mock_body.read.return_value = json.dumps({"clip1": {"comment_count": 2}}).encode()
+        mock_body.read.return_value = json.dumps({"comment_count": 2}).encode()
         mock_s3.get_object.return_value = {"Body": mock_body}
 
         with patch("src.suno_client.boto3.client", return_value=mock_s3):
-            manifest = suno_client.load_manifest()
+            artifact = suno_client.load_song_artifact("clip1")
 
-        assert manifest == {"clip1": {"comment_count": 2}}
-        mock_s3.get_object.assert_called_once_with(Bucket="test-bucket", Key="manifest.json")
+        assert artifact == {"comment_count": 2}
+        mock_s3.get_object.assert_called_once_with(
+            Bucket="test-bucket", Key="songs/clip1.json"
+        )
 
-    def test_load_manifest_returns_empty_dict_when_missing(self, monkeypatch):
+    def test_load_artifact_returns_empty_dict_when_missing(self, monkeypatch):
         monkeypatch.setenv("MANIFEST_BUCKET", "test-bucket")
         mock_s3 = Mock()
         mock_s3.exceptions.NoSuchKey = FakeNoSuchKey
         mock_s3.get_object.side_effect = FakeNoSuchKey()
 
         with patch("src.suno_client.boto3.client", return_value=mock_s3):
-            manifest = suno_client.load_manifest()
+            artifact = suno_client.load_song_artifact("clip1")
 
-        assert manifest == {}
+        assert artifact == {}
 
-    def test_save_manifest_writes_json(self, monkeypatch):
+    def test_save_artifact_writes_json_to_own_key(self, monkeypatch):
         monkeypatch.setenv("MANIFEST_BUCKET", "test-bucket")
         mock_s3 = Mock()
 
         with patch("src.suno_client.boto3.client", return_value=mock_s3):
-            suno_client.save_manifest({"clip1": {"comment_count": 2}})
+            suno_client.save_song_artifact("clip1", {"comment_count": 2})
 
         call_kwargs = mock_s3.put_object.call_args.kwargs
         assert call_kwargs["Bucket"] == "test-bucket"
-        assert call_kwargs["Key"] == "manifest.json"
-        assert json.loads(call_kwargs["Body"]) == {"clip1": {"comment_count": 2}}
+        assert call_kwargs["Key"] == "songs/clip1.json"
+        assert json.loads(call_kwargs["Body"]) == {"comment_count": 2}
 
     def test_raises_without_manifest_bucket(self, monkeypatch):
         monkeypatch.delenv("MANIFEST_BUCKET", raising=False)
 
         with pytest.raises(ValueError, match="MANIFEST_BUCKET"):
-            suno_client.load_manifest()
+            suno_client.load_song_artifact("clip1")
 
 
-class TestRefresh:
-    """Test the end-to-end refresh orchestration."""
+class TestMineSongFacts:
+    """Test diffing one song's live clip/comments against its artifact for candidate facts."""
 
-    def test_finds_new_lore_drop_and_updates_manifest(self, monkeypatch):
-        monkeypatch.setenv("MANIFEST_BUCKET", "test-bucket")
-
-        profiles = {
-            "scuz_patrol": {
-                "clips": [{"id": "clip1", "title": "Incarcerator", "comment_count": 2}]
-            }
+    def _clip(self, **overrides):
+        clip = {
+            "id": "clip1",
+            "title": "Incarcerator",
+            "handle": "scuz_patrol",
+            "comment_count": 1,
+            "caption": "Track 8",
+            "metadata": {"prompt": "backstory + lyrics blob"},
         }
-        clip_data = {
-            "clip1": {
-                "clip": {
-                    "title": "Incarcerator",
-                    "handle": "scuz_patrol",
-                    "created_at": "2026-01-01",
-                    "comment_count": 2,
-                },
-                "comments": {
-                    "results": [
+        clip.update(overrides)
+        return clip
+
+    def test_extracts_new_canon_reply_as_candidate(self):
+        clip = self._clip(caption=None, metadata={})
+        comments = {
+            "results": [
+                {
+                    "id": "c1",
+                    "content": "nice",
+                    "replies": [
                         {
-                            "id": "c1",
-                            "content": "nice",
-                            "replies": [
-                                {"id": "r1", "user_handle": "alfredokilgore", "content": "wrote this in prison"}
-                            ],
+                            "id": "r1",
+                            "user_handle": "alfredokilgore",
+                            "content": "wrote this in prison",
                         }
-                    ]
-                },
-            }
+                    ],
+                }
+            ]
         }
 
-        with patch("src.suno_client.load_manifest", return_value={}), \
-             patch("src.suno_client.fetch_profiles_parallel", return_value=profiles), \
-             patch("src.suno_client.fetch_clip_data_parallel", return_value=clip_data):
-            result = suno_client.refresh(handles={"scuz_patrol"})
+        candidates, updated_artifact = suno_client.mine_song_facts(clip, comments, {})
 
-        assert result["profiles_checked"] == 1
-        assert result["clips_checked"] == 1
-        assert len(result["new_lore_drops"]) == 1
-        assert result["new_lore_drops"][0]["content"] == "wrote this in prison"
-        assert result["new_lore_drops"][0]["handle"] == "alfredokilgore"
+        assert len(candidates) == 1
+        assert candidates[0] == {
+            "content": "wrote this in prison",
+            "handle": "alfredokilgore",
+            "source": "suno_reply",
+            "source_ref": "r1",
+        }
+        assert "r1" in updated_artifact["cached_comment_ids"]
 
-        # refresh() must NOT persist the manifest itself -- the caller only
-        # saves it after successfully handling new_lore_drops, so a crash/
-        # timeout mid-processing can't silently mark drops "seen" without
-        # ever surfacing them.
-        updated_manifest = result["manifest"]
-        assert updated_manifest["clip1"]["comment_count"] == 2
-        assert "r1" in updated_manifest["clip1"]["cached_comment_ids"]
+    def test_extracts_new_caption_as_candidate(self):
+        clip = self._clip(metadata={})
+        comments = {"results": []}
 
-    def test_no_flagged_clips_means_no_lore_drops(self, monkeypatch):
-        monkeypatch.setenv("MANIFEST_BUCKET", "test-bucket")
+        candidates, updated_artifact = suno_client.mine_song_facts(clip, comments, {})
 
-        profiles = {"scuz_patrol": {"clips": [{"id": "clip1", "title": "Song", "comment_count": 2}]}}
-        manifest = {"clip1": {"comment_count": 2, "cached_comment_ids": []}}
+        assert candidates == [
+            {
+                "content": "Track 8",
+                "handle": "scuz_patrol",
+                "source": "suno_caption",
+                "source_ref": "clip1",
+            }
+        ]
+        assert updated_artifact["caption"] == "Track 8"
 
-        with patch("src.suno_client.load_manifest", return_value=manifest), \
-             patch("src.suno_client.fetch_profiles_parallel", return_value=profiles), \
-             patch("src.suno_client.fetch_clip_data_parallel") as mock_fetch_clips:
-            result = suno_client.refresh(handles={"scuz_patrol"})
+    def test_unchanged_caption_is_not_a_candidate(self):
+        clip = self._clip(metadata={})
+        comments = {"results": []}
+        artifact = {"caption": "Track 8"}
 
-        assert result["clips_checked"] == 0
-        assert result["new_lore_drops"] == []
-        mock_fetch_clips.assert_called_once_with([])
-        assert result["manifest"] == manifest
+        candidates, _ = suno_client.mine_song_facts(clip, comments, artifact)
+
+        assert candidates == []
+
+    def test_extracts_new_lyrics_as_candidate(self):
+        clip = self._clip(caption=None)
+        comments = {"results": []}
+
+        candidates, updated_artifact = suno_client.mine_song_facts(clip, comments, {})
+
+        assert candidates == [
+            {
+                "content": "backstory + lyrics blob",
+                "handle": "scuz_patrol",
+                "source": "suno_lyrics",
+                "source_ref": "clip1",
+            }
+        ]
+        assert updated_artifact["lyrics"] == "backstory + lyrics blob"
+
+    def test_unchanged_lyrics_is_not_a_candidate(self):
+        clip = self._clip(caption=None)
+        comments = {"results": []}
+        artifact = {"lyrics": "backstory + lyrics blob"}
+
+        candidates, _ = suno_client.mine_song_facts(clip, comments, artifact)
+
+        assert candidates == []
+
+    def test_updated_artifact_reflects_all_current_values_even_with_no_candidates(self):
+        clip = self._clip()
+        comments = {"results": []}
+        artifact = {"caption": "Track 8", "lyrics": "backstory + lyrics blob"}
+
+        candidates, updated_artifact = suno_client.mine_song_facts(
+            clip, comments, artifact
+        )
+
+        assert candidates == []
+        assert updated_artifact["comment_count"] == 1
+        assert updated_artifact["caption"] == "Track 8"
+        assert updated_artifact["lyrics"] == "backstory + lyrics blob"
+
+
+class TestEnqueueSong:
+    """Test enqueueing one song onto the FIFO song ingest queue."""
+
+    def test_sends_message_with_single_group_and_dedup_id(self, monkeypatch):
+        monkeypatch.setenv("SONG_QUEUE_URL", "https://sqs.example/test-queue.fifo")
+        mock_sqs = Mock()
+
+        with patch("src.suno_client.boto3.client", return_value=mock_sqs):
+            suno_client.enqueue_song("clip1", "scuz_patrol", "Incarcerator")
+
+        call_kwargs = mock_sqs.send_message.call_args.kwargs
+        assert call_kwargs["QueueUrl"] == "https://sqs.example/test-queue.fifo"
+        assert call_kwargs["MessageGroupId"] == "songs"
+        assert call_kwargs["MessageDeduplicationId"] == "clip1"
+        body = json.loads(call_kwargs["MessageBody"])
+        assert body == {
+            "clip_id": "clip1",
+            "handle": "scuz_patrol",
+            "title": "Incarcerator",
+        }
+
+    def test_raises_without_song_queue_url(self, monkeypatch):
+        monkeypatch.delenv("SONG_QUEUE_URL", raising=False)
+
+        with pytest.raises(ValueError, match="SONG_QUEUE_URL"):
+            suno_client.enqueue_song("clip1", "scuz_patrol", "Incarcerator")

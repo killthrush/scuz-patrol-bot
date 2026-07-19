@@ -11,6 +11,7 @@ logger = logging.getLogger()
 
 class DiscordWebhookError(Exception):
     """Raised when Discord webhook validation fails."""
+
     pass
 
 
@@ -39,6 +40,7 @@ def verify_discord_signature(
         # Use nacl if available, otherwise fall back to basic validation
         try:
             import nacl.signing
+
             verify_key = nacl.signing.VerifyKey(bytes.fromhex(public_key))
             verify_key.verify(message.encode(), bytes.fromhex(signature))
             return True
@@ -47,9 +49,7 @@ def verify_discord_signature(
             # In production, nacl is recommended
             logger.warning("nacl library not available, using basic validation")
             expected = hmac.new(
-                public_key.encode(),
-                message.encode(),
-                hashlib.sha256
+                public_key.encode(), message.encode(), hashlib.sha256
             ).hexdigest()
             return hmac.compare_digest(expected, signature)
     except Exception as e:
@@ -76,23 +76,23 @@ def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
     import os
 
     # Extract headers for signature verification
-    headers = event.get('headers', {})
-    signature = headers.get('x-signature-ed25519')
-    timestamp = headers.get('x-signature-timestamp')
+    headers = event.get("headers", {})
+    signature = headers.get("x-signature-ed25519")
+    timestamp = headers.get("x-signature-timestamp")
 
     # Get raw body (must be exact as Discord sent it)
-    body = event.get('body', '')
+    body = event.get("body", "")
     if isinstance(body, str):
         body_str = body
     else:
         body_str = json.dumps(body)
 
     # Verify Discord signature
-    public_key = os.getenv('DISCORD_PUBLIC_KEY')
+    public_key = os.getenv("DISCORD_PUBLIC_KEY")
     if public_key and signature and timestamp:
         if not verify_discord_signature(body_str, signature, timestamp, public_key):
             logger.warning("Invalid Discord signature")
-            return {'type': 'invalid_signature'}
+            return {"type": "invalid_signature"}
     elif signature or timestamp:
         logger.warning("Missing Discord signature headers")
 
@@ -100,62 +100,56 @@ def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
     try:
         if not body_str or not body_str.strip():
             logger.warning("Empty request body")
-            return {'type': 'unknown', 'raw_payload': {}}
+            return {"type": "unknown", "raw_payload": {}}
         payload = json.loads(body_str)
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in request body: {e}")
-        return {'type': 'unknown', 'raw_payload': {}}
+        return {"type": "unknown", "raw_payload": {}}
 
     # Handle Discord challenge (required for initial webhook registration)
-    if payload.get('type') == 1:  # INTERACTION_PING
+    if payload.get("type") == 1:  # INTERACTION_PING
         logger.info("Received Discord PING challenge")
-        return {
-            'type': 'ping',
-            'respond_with': {'type': 1}  # PING response
-        }
+        return {"type": "ping", "respond_with": {"type": 1}}  # PING response
 
     # Handle APPLICATION_COMMAND events (slash commands)
-    if payload.get('type') == 2:  # APPLICATION_COMMAND
-        interaction = payload.get('data', {})
-        user = payload.get('member', {}).get('user', {})
+    if payload.get("type") == 2:  # APPLICATION_COMMAND
+        interaction = payload.get("data", {})
+        user = payload.get("member", {}).get("user", {})
 
         return {
-            'type': 'command',
-            'interaction_token': payload.get('token'),
-            'interaction_id': payload.get('id'),
-            'guild_id': payload.get('guild_id'),
-            'channel_id': payload.get('channel_id'),
-            'user_id': user.get('id'),
-            'user_name': user.get('username'),
-            'command_name': interaction.get('name'),
-            'command_options': interaction.get('options', []),
+            "type": "command",
+            "interaction_token": payload.get("token"),
+            "interaction_id": payload.get("id"),
+            "guild_id": payload.get("guild_id"),
+            "channel_id": payload.get("channel_id"),
+            "user_id": user.get("id"),
+            "user_name": user.get("username"),
+            "command_name": interaction.get("name"),
+            "command_options": interaction.get("options", []),
         }
 
     # Handle MESSAGE_COMPONENT events (button clicks)
-    if payload.get('type') == 3:  # MESSAGE_COMPONENT
-        interaction = payload.get('data', {})
-        user = payload.get('member', {}).get('user', {})
-        message = payload.get('message', {})
+    if payload.get("type") == 3:  # MESSAGE_COMPONENT
+        interaction = payload.get("data", {})
+        user = payload.get("member", {}).get("user", {})
+        message = payload.get("message", {})
 
         return {
-            'type': 'component',
-            'interaction_token': payload.get('token'),
-            'interaction_id': payload.get('id'),
-            'guild_id': payload.get('guild_id'),
-            'channel_id': payload.get('channel_id'),
-            'user_id': user.get('id'),
-            'user_name': user.get('username'),
-            'custom_id': interaction.get('custom_id'),
-            'message_content': message.get('content', ''),
-            'message_embeds': message.get('embeds', []),
+            "type": "component",
+            "interaction_token": payload.get("token"),
+            "interaction_id": payload.get("id"),
+            "guild_id": payload.get("guild_id"),
+            "channel_id": payload.get("channel_id"),
+            "user_id": user.get("id"),
+            "user_name": user.get("username"),
+            "custom_id": interaction.get("custom_id"),
+            "message_content": message.get("content", ""),
+            "message_embeds": message.get("embeds", []),
         }
 
     # Fallback for unknown event types
     logger.warning(f"Unhandled Discord event type: {payload.get('type')}")
-    return {
-        'type': 'unknown',
-        'raw_payload': payload
-    }
+    return {"type": "unknown", "raw_payload": payload}
 
 
 def extract_message_from_event(parsed_event: Dict[str, Any]) -> Optional[str]:
@@ -167,11 +161,11 @@ def extract_message_from_event(parsed_event: Dict[str, Any]) -> Optional[str]:
     Returns:
         The message text, or None if not a message event
     """
-    if parsed_event.get('type') == 'command':
+    if parsed_event.get("type") == "command":
         # Extract text from command options
-        options = parsed_event.get('command_options', [])
+        options = parsed_event.get("command_options", [])
         for option in options:
-            if option.get('type') == 3:  # STRING type
-                return option.get('value')
+            if option.get("type") == 3:  # STRING type
+                return option.get("value")
 
     return None

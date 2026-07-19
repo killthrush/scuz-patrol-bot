@@ -33,8 +33,9 @@ def body_paragraph(text: str, start: int, end: int) -> dict:
 @pytest.fixture
 def mock_service():
     """Mock the Google Docs API service."""
-    with patch("src.google_docs_client.build") as mock_build, \
-         patch("src.google_docs_client.Credentials.from_service_account_info"):
+    with patch("src.google_docs_client.build") as mock_build, patch(
+        "src.google_docs_client.Credentials.from_service_account_info"
+    ):
         service = Mock()
         mock_build.return_value = service
         yield service
@@ -42,7 +43,9 @@ def mock_service():
 
 @pytest.fixture
 def client(monkeypatch, mock_service):
-    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_KEY", json.dumps({"type": "service_account"}))
+    monkeypatch.setenv(
+        "GOOGLE_SERVICE_ACCOUNT_KEY", json.dumps({"type": "service_account"})
+    )
     monkeypatch.setenv("GOOGLE_DOC_ID", "test-doc-id")
     return GoogleDocsClient()
 
@@ -59,7 +62,9 @@ class TestAppendToSection:
             body_paragraph("Kilgore, Kero.\n", 46, 61),
             heading("Supporting Characters\n", 61, 84),
         ]
-        mock_service.documents().get().execute.return_value = {"body": {"content": content}}
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
 
         client.append_to_section("New band member info", "Band Members")
 
@@ -76,7 +81,9 @@ class TestAppendToSection:
             heading("Band Members\n", 18, 32),
             body_paragraph("Kilgore, Kero.\n", 32, 47),
         ]
-        mock_service.documents().get().execute.return_value = {"body": {"content": content}}
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
 
         client.append_to_section("New band member info", "Band Members")
 
@@ -84,13 +91,17 @@ class TestAppendToSection:
         insert_request = batch_call.kwargs["body"]["requests"][0]["insertText"]
         assert insert_request["location"]["index"] == 46  # content[-1]['endIndex'] - 1
 
-    def test_falls_back_to_end_of_document_when_section_missing(self, client, mock_service):
+    def test_falls_back_to_end_of_document_when_section_missing(
+        self, client, mock_service
+    ):
         """Should append to the end of the doc if no heading matches the section."""
         content = [
             heading("Band Chronology\n", 1, 18),
             body_paragraph("Some history.\n", 18, 32),
         ]
-        mock_service.documents().get().execute.return_value = {"body": {"content": content}}
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
 
         client.append_to_section("Orphan lore", "Nonexistent Section")
 
@@ -105,7 +116,9 @@ class TestAppendToSection:
             heading("Band Members\n", 1, 15),
             heading("Supporting Characters\n", 15, 38),
         ]
-        mock_service.documents().get().execute.return_value = {"body": {"content": content}}
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
 
         client.append_to_section("New info", "  band members  ")
 

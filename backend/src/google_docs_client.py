@@ -24,7 +24,7 @@ class GoogleDocsClient:
                  populated by handler from Secrets Manager)
         """
         if service_account_key is None:
-            service_account_key = os.getenv('GOOGLE_SERVICE_ACCOUNT_KEY')
+            service_account_key = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
 
         if not service_account_key:
             raise ValueError("GOOGLE_SERVICE_ACCOUNT_KEY not set")
@@ -36,12 +36,11 @@ class GoogleDocsClient:
 
         # Create credentials scoped to Google Docs API
         self.credentials = Credentials.from_service_account_info(
-            key_data,
-            scopes=['https://www.googleapis.com/auth/documents']
+            key_data, scopes=["https://www.googleapis.com/auth/documents"]
         )
 
-        self.service = build('docs', 'v1', credentials=self.credentials)
-        self.doc_id = os.getenv('GOOGLE_DOC_ID')
+        self.service = build("docs", "v1", credentials=self.credentials)
+        self.doc_id = os.getenv("GOOGLE_DOC_ID")
         if not self.doc_id:
             raise ValueError("GOOGLE_DOC_ID not set")
 
@@ -78,21 +77,21 @@ class GoogleDocsClient:
             logger.info(f"Reading document {self.doc_id}")
 
             doc = self.service.documents().get(documentId=self.doc_id).execute()
-            content = doc.get('body', {}).get('content', [])
+            content = doc.get("body", {}).get("content", [])
 
             # Extract text from document structure
             text_parts = []
             for element in content:
-                if 'paragraph' in element:
-                    paragraph = element['paragraph']
+                if "paragraph" in element:
+                    paragraph = element["paragraph"]
                     para_text = self._extract_text_from_element(paragraph)
                     if para_text.strip():
                         text_parts.append(para_text)
-                elif 'table' in element:
+                elif "table" in element:
                     # Skip tables for now, just note they exist
                     text_parts.append("[TABLE]")
 
-            result = '\n'.join(text_parts)
+            result = "\n".join(text_parts)
             logger.info(f"Read {len(result)} characters from canon doc")
             return result
 
@@ -111,10 +110,10 @@ class GoogleDocsClient:
         """
         text = ""
 
-        if 'elements' in element:
-            for run in element['elements']:
-                if 'textRun' in run:
-                    text += run['textRun'].get('content', '')
+        if "elements" in element:
+            for run in element["elements"]:
+                if "textRun" in run:
+                    text += run["textRun"].get("content", "")
 
         return text
 
@@ -127,18 +126,10 @@ class GoogleDocsClient:
         try:
             logger.info("Appending to end of document")
 
-            requests = [
-                {
-                    'insertText': {
-                        'text': f'\n\n{text}',
-                        'endOfDocument': True
-                    }
-                }
-            ]
+            requests = [{"insertText": {"text": f"\n\n{text}", "endOfDocument": True}}]
 
             self.service.documents().batchUpdate(
-                documentId=self.doc_id,
-                body={'requests': requests}
+                documentId=self.doc_id, body={"requests": requests}
             ).execute()
 
             logger.info(f"Successfully appended {len(text)} characters")
@@ -161,23 +152,23 @@ class GoogleDocsClient:
         """
         try:
             doc = self.service.documents().get(documentId=self.doc_id).execute()
-            content = doc.get('body', {}).get('content', [])
+            content = doc.get("body", {}).get("content", [])
 
             insert_index = None
             in_target_section = False
 
             for element in content:
-                paragraph = element.get('paragraph')
+                paragraph = element.get("paragraph")
                 if not paragraph:
                     continue
 
-                style = paragraph.get('paragraphStyle', {}).get('namedStyleType', '')
-                if not style.startswith('HEADING'):
+                style = paragraph.get("paragraphStyle", {}).get("namedStyleType", "")
+                if not style.startswith("HEADING"):
                     continue
 
                 if in_target_section:
                     # Found the next heading after our target section started
-                    insert_index = element['startIndex']
+                    insert_index = element["startIndex"]
                     break
 
                 heading_text = self._extract_text_from_element(paragraph).strip()
@@ -186,29 +177,34 @@ class GoogleDocsClient:
 
             if in_target_section and insert_index is None and content:
                 # Target section was the last one in the document
-                insert_index = content[-1]['endIndex'] - 1
+                insert_index = content[-1]["endIndex"] - 1
 
             if insert_index is None:
-                logger.warning(f"Section '{section}' not found, appending to end of document")
+                logger.warning(
+                    f"Section '{section}' not found, appending to end of document"
+                )
                 self.append_to_document(text)
                 return
 
-            logger.info(f"Inserting lore into section '{section}' at index {insert_index}")
+            logger.info(
+                f"Inserting lore into section '{section}' at index {insert_index}"
+            )
             requests = [
                 {
-                    'insertText': {
-                        'text': f'\n{text}\n',
-                        'location': {'index': insert_index},
+                    "insertText": {
+                        "text": f"\n{text}\n",
+                        "location": {"index": insert_index},
                     }
                 }
             ]
 
             self.service.documents().batchUpdate(
-                documentId=self.doc_id,
-                body={'requests': requests}
+                documentId=self.doc_id, body={"requests": requests}
             ).execute()
 
-            logger.info(f"Successfully inserted {len(text)} characters into section '{section}'")
+            logger.info(
+                f"Successfully inserted {len(text)} characters into section '{section}'"
+            )
 
         except Exception as e:
             logger.error(f"Failed to append to section '{section}': {e}")

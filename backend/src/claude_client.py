@@ -21,7 +21,7 @@ class ClaudeClient:
                      populated by handler from Secrets Manager)
         """
         if api_key is None:
-            api_key = os.getenv('ANTHROPIC_API_KEY')
+            api_key = os.getenv("ANTHROPIC_API_KEY")
 
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY not set")
@@ -122,7 +122,9 @@ Respond with JSON matching this schema:
             try:
                 result = json.loads(response_text)
             except json.JSONDecodeError:
-                logger.error(f"Failed to parse Claude response as JSON: {response_text}")
+                logger.error(
+                    f"Failed to parse Claude response as JSON: {response_text}"
+                )
                 return {
                     "intent": "neither",
                     "confidence": 0.0,

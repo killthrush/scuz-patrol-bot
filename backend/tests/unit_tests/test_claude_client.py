@@ -367,24 +367,32 @@ class TestSynthesizeDoc:
     def test_returns_sections_and_fact_accounting(self, monkeypatch, mock_anthropic):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
-        response_text = json.dumps(
-            {
-                "doc_sections": [
-                    {"name": "Band Members", "content": "Updated body text"}
-                ],
-                "fact_accounting": [
+        response_text = "\n".join(
+            [
+                json.dumps(
                     {
+                        "type": "fact",
                         "fact_id": "f1",
                         "status": "included",
                         "section": "Band Members",
-                    },
+                    }
+                ),
+                json.dumps(
                     {
+                        "type": "fact",
                         "fact_id": "f2",
                         "status": "already_present",
                         "section": None,
-                    },
-                ],
-            }
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "section",
+                        "name": "Band Members",
+                        "content": "Updated body text",
+                    }
+                ),
+            ]
         )
         mock_response = Mock()
         mock_response.content = [Mock(text=response_text, type="text")]
@@ -480,7 +488,7 @@ class TestSynthesizeDoc:
 
         assert result == {"doc_sections": [], "fact_accounting": []}
 
-    def test_raises_on_invalid_json_response(self, monkeypatch, mock_anthropic):
+    def test_unparseable_line_is_skipped_not_raised(self, monkeypatch, mock_anthropic):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
@@ -496,8 +504,57 @@ class TestSynthesizeDoc:
         mock_anthropic.return_value = mock_client
 
         client = ClaudeClient(api_key="test_key")
-        with pytest.raises(json.JSONDecodeError):
-            client.synthesize_doc("current doc text", self._facts())
+        result = client.synthesize_doc("current doc text", self._facts())
+
+        assert result == {"doc_sections": [], "fact_accounting": []}
+
+    def test_valid_lines_survive_truncation_of_a_later_line(
+        self, monkeypatch, mock_anthropic
+    ):
+        """The whole point of JSONL: a truncated trailing line shouldn't
+        take down the complete lines that already generated fine."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
+
+        response_text = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "fact",
+                        "fact_id": "f1",
+                        "status": "included",
+                        "section": "Band Members",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "fact",
+                        "fact_id": "f2",
+                        "status": "already_present",
+                        "section": None,
+                    }
+                ),
+                '{"type": "section", "name": "Band Members", "content": "cut off mid',
+            ]
+        )
+        mock_response = Mock()
+        mock_response.content = [Mock(text=response_text, type="text")]
+        mock_response.stop_reason = "max_tokens"
+        mock_response.usage = Mock(
+            input_tokens=1,
+            output_tokens=1,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        mock_client = Mock()
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic.return_value = mock_client
+
+        client = ClaudeClient(api_key="test_key")
+        result = client.synthesize_doc("current doc text", self._facts())
+
+        assert result["doc_sections"] == []
+        assert len(result["fact_accounting"]) == 2
+        assert {f["fact_id"] for f in result["fact_accounting"]} == {"f1", "f2"}
 
 
 class TestAnswerQuestion:

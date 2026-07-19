@@ -105,11 +105,20 @@ resource "aws_iam_role_policy" "lambda_manifest_bucket" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["s3:GetObject", "s3:PutObject"]
-      Resource = ["${aws_s3_bucket.manifest.arn}/*"]
-    }]
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
+        Resource = ["${aws_s3_bucket.manifest.arn}/*"]
+      },
+      {
+        # GetObject on a nonexistent key returns AccessDenied instead of
+        # NoSuchKey without this -- needed on first run before manifest.json exists.
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [aws_s3_bucket.manifest.arn]
+      }
+    ]
   })
 }
 

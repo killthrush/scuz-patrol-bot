@@ -29,6 +29,15 @@ SUNO_API_BASE = "https://studio-api-prod.suno.com/api"
 SUNO_HEADERS = {"User-Agent": "Mozilla/5.0"}
 REQUEST_TIMEOUT = 15
 
+# Suno profiles that actually post songs -- these are the ones checked for
+# new clips. scuz_patrol is the band's account; alfredokilgore is an
+# in-character account. The other canon-voice handles below are the real
+# artists behind the project (pixie/metrivus, killthrush) -- they comment
+# and drop lore, but don't have their own song profiles to scan.
+PROFILE_HANDLES = {"scuz_patrol", "alfredokilgore"}
+
+# Accounts whose REPLIES count as authoritative lore drops, regardless of
+# which profile's song they're replying under.
 CANON_HANDLES = {"scuz_patrol", "alfredokilgore", "metrivus", "killthrush", "lubonit84"}
 
 MANIFEST_KEY = "manifest.json"
@@ -170,7 +179,7 @@ def save_manifest(manifest: Dict[str, Any]) -> None:
 
 
 def refresh(handles: Optional[Set[str]] = None) -> Dict[str, Any]:
-    """Check canon-voice Suno profiles for new songs/lore drops, updating the manifest.
+    """Check song-posting Suno profiles for new songs/lore drops, updating the manifest.
 
     Fetches all profiles in parallel, diffs against the manifest to find only
     what's new or changed, fetches those clips' full data in parallel, then
@@ -184,7 +193,7 @@ def refresh(handles: Optional[Set[str]] = None) -> Dict[str, Any]:
                                  "parent_content", "created_at"}],
         }
     """
-    handles = handles or CANON_HANDLES
+    handles = handles or PROFILE_HANDLES
     manifest = load_manifest()
 
     profiles = fetch_profiles_parallel(handles)

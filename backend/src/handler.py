@@ -463,6 +463,80 @@ def _handle_song_refresh_worker(event: Dict[str, Any]) -> Dict[str, Any]:
     return {"statusCode": 200}
 
 
+def _put_candidate_fact(
+    candidate: Dict[str, Any],
+    section: str,
+    classification: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        fact_store.put_fact(
+            content=candidate["content"],
+            section_hint=section,
+            handle=candidate["handle"],
+            source=candidate["source"],
+            source_ref=candidate["source_ref"],
+            category=candidate["category"],
+            classification=json.dumps(classification) if classification else None,
+        )
+    except ValueError as e:
+        logger.warning(f"Skipping oversized {candidate['source']} fact: {e}")
+
+
+def _write_candidate(
+    candidate: Dict[str, Any],
+    clip_id: str,
+    claude: Optional[ClaudeClient],
+    canon_doc: Optional[str],
+) -> None:
+    """Classify (if needed) and record one mined candidate as a fact.
+
+    Lyrics/credit candidates never need classification -- they're recorded
+    as-is. Lore from scuz_patrol/alfredokilgore (always_canon) skips the
+    lore/question/neither gate since those accounts never speak out of
+    character, but Claude is still asked for a section suggestion. Everything
+    else goes through the normal gate.
+    """
+    if candidate["category"] != fact_store.CATEGORY_LORE:
+        section = (
+            "Lyrics Archive"
+            if candidate["category"] == fact_store.CATEGORY_LYRICS
+            else "Credits"
+        )
+        _put_candidate_fact(candidate, section)
+        return
+
+    if candidate.get("always_canon"):
+        section = "Unexplored Ideas"
+        classification = None
+        if claude is not None and canon_doc is not None:
+            try:
+                classification = claude.classify_intent(candidate["content"], canon_doc)
+                section = str(classification.get("suggested_section") or section)
+            except Exception as e:
+                logger.error(
+                    f"Failed to get section suggestion for {candidate['source']} "
+                    f"candidate for song {clip_id}: {e}"
+                )
+        _put_candidate_fact(candidate, section, classification)
+        return
+
+    if claude is None or canon_doc is None:
+        return
+    try:
+        classification = claude.classify_intent(candidate["content"], canon_doc)
+    except Exception as e:
+        logger.error(
+            f"Failed to classify {candidate['source']} candidate for song {clip_id}: {e}"
+        )
+        return
+
+    if classification.get("intent") != "new_lore":
+        return
+
+    section = str(classification.get("suggested_section", "Unexplored Ideas"))
+    _put_candidate_fact(candidate, section, classification)
+
+
 def _process_song_queue_message(message: Dict[str, Any]) -> None:
     """Mine one song's comments/caption/lyrics for new lore and record any as facts.
 
@@ -477,41 +551,17 @@ def _process_song_queue_message(message: Dict[str, Any]) -> None:
     artifact = suno_client.load_song_artifact(clip_id)
     candidates, updated_artifact = suno_client.mine_song_facts(clip, comments, artifact)
 
-    if candidates:
+    claude: Optional[ClaudeClient] = None
+    canon_doc: Optional[str] = None
+    if any(c["category"] == fact_store.CATEGORY_LORE for c in candidates):
         try:
-            claude: Optional[ClaudeClient] = ClaudeClient()
-            canon_doc: Optional[str] = GoogleDocsClient().read_document()
+            claude = ClaudeClient()
+            canon_doc = GoogleDocsClient().read_document()
         except Exception as e:
             logger.error(f"Failed to init clients for song {clip_id}: {e}")
-            claude = None
-            canon_doc = None
 
-        for candidate in candidates:
-            if claude is None or canon_doc is None:
-                continue
-            try:
-                classification = claude.classify_intent(candidate["content"], canon_doc)
-            except Exception as e:
-                logger.error(
-                    f"Failed to classify {candidate['source']} candidate for song {clip_id}: {e}"
-                )
-                continue
-
-            if classification.get("intent") != "new_lore":
-                continue
-
-            section = str(classification.get("suggested_section", "Unexplored Ideas"))
-            try:
-                fact_store.put_fact(
-                    content=candidate["content"],
-                    section_hint=section,
-                    handle=candidate["handle"],
-                    source=candidate["source"],
-                    source_ref=candidate["source_ref"],
-                    classification=json.dumps(classification),
-                )
-            except ValueError as e:
-                logger.warning(f"Skipping oversized fact from song {clip_id}: {e}")
+    for candidate in candidates:
+        _write_candidate(candidate, clip_id, claude, canon_doc)
 
     suno_client.save_song_artifact(clip_id, updated_artifact)
 
@@ -539,10 +589,12 @@ def reconstruct_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     reconstruction_trigger.schedule_reconstruction() pushes back on every
     fact write, so this only runs once a burst of new facts goes quiet.
 
-    First-pass reconstruction: fold each pending fact into its section via
-    a plain append (same primitive /lore already uses), then mark it
-    integrated. Purely additive -- no existing doc content is rewritten or
-    deleted -- so a bad fact can't destroy prior canon. A real "rebuild the
+    First-pass reconstruction: fold each pending CATEGORY_LORE fact into its
+    section via a plain append (same primitive /lore already uses), then
+    mark it integrated. Purely additive -- no existing doc content is
+    rewritten or deleted -- so a bad fact can't destroy prior canon. Lyrics/
+    credit facts are marked integrated without any doc write -- they're
+    recorded for reference, never folded into canon. A real "rebuild the
     whole doc from all non-superseded facts" pass is future work.
     """
     pending = fact_store.get_pending_facts()
@@ -550,12 +602,18 @@ def reconstruct_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         logger.info("Reconstruction triggered with no pending facts, nothing to do")
         return {"statusCode": 200}
 
-    docs = GoogleDocsClient()
+    docs: Optional[GoogleDocsClient] = None
     doc_version = datetime.now(timezone.utc).isoformat()
 
     for fact in pending:
         try:
-            docs.append_to_section(fact["content"], fact["section_hint"])
+            if (
+                fact.get("category", fact_store.CATEGORY_LORE)
+                == fact_store.CATEGORY_LORE
+            ):
+                if docs is None:
+                    docs = GoogleDocsClient()
+                docs.append_to_section(fact["content"], fact["section_hint"])
             fact_store.mark_integrated(fact["fact_id"], doc_version)
         except Exception as e:
             logger.error(f"Failed to integrate fact {fact['fact_id']}: {e}")

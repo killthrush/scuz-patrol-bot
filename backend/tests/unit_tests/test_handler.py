@@ -698,8 +698,54 @@ class TestSongQueueWorker:
         assert call_kwargs["source"] == "suno_reply"
         assert call_kwargs["source_ref"] == "r1"
         assert call_kwargs["section_hint"] == "Band Members"
+        assert call_kwargs["category"] == "lore"
         mock_save_artifact.assert_called_once()
         assert mock_save_artifact.call_args.args[0] == "clip1"
+
+    def test_always_canon_reply_is_written_even_when_classified_as_neither(
+        self, mock_clients
+    ):
+        """alfredokilgore/scuz_patrol never speak out of character -- their
+        words skip the lore/question/neither gate entirely."""
+        mock_clients["claude"].classify_intent.return_value = {
+            "intent": "neither",
+            "suggested_section": "Band Chronology",
+        }
+        mock_clients["docs"].read_document.return_value = "Canon doc"
+
+        comments = {
+            "results": [
+                {
+                    "id": "c1",
+                    "content": "nice",
+                    "replies": [
+                        {
+                            "id": "r1",
+                            "user_handle": "alfredokilgore",
+                            "content": "wrote this in prison",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with patch(
+            "src.handler.suno_client.fetch_clip", return_value=self._clip()
+        ), patch(
+            "src.handler.suno_client.fetch_comments", return_value=comments
+        ), patch(
+            "src.handler.suno_client.load_song_artifact", return_value={}
+        ), patch(
+            "src.handler.suno_client.save_song_artifact"
+        ), patch(
+            "src.handler.fact_store.put_fact"
+        ) as mock_put_fact:
+            lambda_handler(
+                sqs_event({"clip_id": "clip1", "handle": "scuz_patrol"}), None
+            )
+
+        mock_put_fact.assert_called_once()
+        assert mock_put_fact.call_args.kwargs["section_hint"] == "Band Chronology"
 
     def test_new_caption_is_written_to_fact_store(self, mock_clients):
         mock_clients["claude"].classify_intent.return_value = {
@@ -727,16 +773,66 @@ class TestSongQueueWorker:
         call_kwargs = mock_put_fact.call_args.kwargs
         assert call_kwargs["content"] == "Wrote this after the breakup"
         assert call_kwargs["source"] == "suno_caption"
+        assert call_kwargs["category"] == "lore"
 
-    def test_non_lore_candidate_is_not_written(self, mock_clients):
-        mock_clients["claude"].classify_intent.return_value = {"intent": "neither"}
+    def test_caption_mentioning_contributor_also_written_as_credit_fact(
+        self, mock_clients
+    ):
+        mock_clients["claude"].classify_intent.return_value = {
+            "intent": "new_lore",
+            "suggested_section": "Virtual Discography",
+        }
         mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
             "src.handler.suno_client.fetch_clip",
-            return_value=self._clip(caption="Track 8"),
+            return_value=self._clip(caption="Vocals by killthrush on this one"),
         ), patch(
             "src.handler.suno_client.fetch_comments", return_value={"results": []}
+        ), patch(
+            "src.handler.suno_client.load_song_artifact", return_value={}
+        ), patch(
+            "src.handler.suno_client.save_song_artifact"
+        ), patch(
+            "src.handler.fact_store.put_fact"
+        ) as mock_put_fact:
+            lambda_handler(
+                sqs_event({"clip_id": "clip1", "handle": "scuz_patrol"}), None
+            )
+
+        assert mock_put_fact.call_count == 2
+        by_source = {c.kwargs["source"]: c.kwargs for c in mock_put_fact.call_args_list}
+        assert by_source["suno_caption"]["category"] == "lore"
+        assert by_source["suno_caption_credit"]["category"] == "credit"
+        assert by_source["suno_caption_credit"]["section_hint"] == "Credits"
+        assert by_source["suno_caption_credit"]["classification"] is None
+
+    def test_gated_reply_from_real_person_respects_classification(self, mock_clients):
+        """metrivus/killthrush/lubonit84 aren't always in-character, so their
+        replies still go through the lore/question/neither gate."""
+        mock_clients["claude"].classify_intent.return_value = {"intent": "neither"}
+        mock_clients["docs"].read_document.return_value = "Canon doc"
+
+        comments = {
+            "results": [
+                {
+                    "id": "c1",
+                    "content": "nice",
+                    "replies": [
+                        {
+                            "id": "r1",
+                            "user_handle": "metrivus",
+                            "content": "just chatting, not lore",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with patch(
+            "src.handler.suno_client.fetch_clip", return_value=self._clip()
+        ), patch(
+            "src.handler.suno_client.fetch_comments", return_value=comments
         ), patch(
             "src.handler.suno_client.load_song_artifact", return_value={}
         ), patch(
@@ -749,9 +845,48 @@ class TestSongQueueWorker:
             )
 
         assert not mock_put_fact.called
-        # Artifact is still updated so an unchanged, already-rejected caption
+        # Artifact is still updated so an unchanged, already-rejected reply
         # isn't re-classified again on the next pass.
         assert mock_save_artifact.called
+
+    def test_lyrics_candidate_is_written_without_classification(self, mock_clients):
+        mock_clients["claude"].classify_intent.return_value = {
+            "intent": "new_lore",
+            "suggested_section": "Virtual Discography",
+        }
+        mock_clients["docs"].read_document.return_value = "Canon doc"
+
+        with patch(
+            "src.handler.suno_client.fetch_clip",
+            return_value=self._clip(
+                metadata={"prompt": "Some backstory+×÷actual lyrics here"}
+            ),
+        ), patch(
+            "src.handler.suno_client.fetch_comments", return_value={"results": []}
+        ), patch(
+            "src.handler.suno_client.load_song_artifact", return_value={}
+        ), patch(
+            "src.handler.suno_client.save_song_artifact"
+        ), patch(
+            "src.handler.fact_store.put_fact"
+        ) as mock_put_fact:
+            lambda_handler(
+                sqs_event({"clip_id": "clip1", "handle": "scuz_patrol"}), None
+            )
+
+        assert mock_put_fact.call_count == 2
+        by_source = {c.kwargs["source"]: c.kwargs for c in mock_put_fact.call_args_list}
+        assert by_source["suno_backstory"]["category"] == "lore"
+        assert by_source["suno_backstory"]["content"] == "Some backstory"
+        assert by_source["suno_lyrics_text"]["category"] == "lyrics"
+        assert by_source["suno_lyrics_text"]["content"] == "actual lyrics here"
+        assert by_source["suno_lyrics_text"]["section_hint"] == "Lyrics Archive"
+        assert by_source["suno_lyrics_text"]["classification"] is None
+        # Only the backstory candidate needs a classification call -- lyrics
+        # never do.
+        mock_clients["claude"].classify_intent.assert_called_once_with(
+            "Some backstory", "Canon doc"
+        )
 
     def test_oversized_candidate_is_skipped_not_raised(self, mock_clients):
         from src.fact_store import MAX_FACT_LENGTH
@@ -805,7 +940,10 @@ class TestSongQueueWorker:
         assert mock_save_artifact.called
 
     def test_processes_each_record_in_a_batch_independently(self, mock_clients):
-        mock_clients["claude"].classify_intent.return_value = {"intent": "neither"}
+        mock_clients["claude"].classify_intent.return_value = {
+            "intent": "new_lore",
+            "suggested_section": "Band Chronology",
+        }
         mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
@@ -819,7 +957,9 @@ class TestSongQueueWorker:
             "src.handler.suno_client.load_song_artifact", return_value={}
         ), patch(
             "src.handler.suno_client.save_song_artifact"
-        ) as mock_save_artifact:
+        ) as mock_save_artifact, patch(
+            "src.handler.fact_store.put_fact"
+        ) as mock_put_fact:
             response = lambda_handler(
                 sqs_event(
                     {"clip_id": "clip1", "handle": "a"},
@@ -830,6 +970,7 @@ class TestSongQueueWorker:
 
         assert response["statusCode"] == 200
         assert mock_save_artifact.call_count == 2
+        assert mock_put_fact.call_count == 2
 
 
 class TestReconstructHandler:

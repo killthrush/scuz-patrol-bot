@@ -229,6 +229,44 @@ class TestSongArtifactStorage:
             suno_client.load_song_artifact("clip1")
 
 
+class TestIsTrivial:
+    """Test the emoji/whitespace-only content filter."""
+
+    def test_empty_and_whitespace_are_trivial(self):
+        assert suno_client._is_trivial("")
+        assert suno_client._is_trivial("   ")
+        assert suno_client._is_trivial(None)
+
+    def test_emoji_only_is_trivial(self):
+        assert suno_client._is_trivial("🔥🔥🔥")
+        assert suno_client._is_trivial("!!!")
+
+    def test_real_text_is_not_trivial(self):
+        assert not suno_client._is_trivial("wrote this in prison")
+        assert not suno_client._is_trivial("🔥 nice track")
+
+
+class TestSplitLyricBox:
+    """Test splitting Suno's lyric box into backstory + lyrics."""
+
+    def test_splits_on_delimiter(self):
+        backstory, lyrics = suno_client._split_lyric_box(
+            "Written after the breakup+×÷it follows, it follows"
+        )
+        assert backstory == "Written after the breakup"
+        assert lyrics == "it follows, it follows"
+
+    def test_no_delimiter_treats_whole_thing_as_backstory(self):
+        backstory, lyrics = suno_client._split_lyric_box("just a backstory blurb")
+        assert backstory == "just a backstory blurb"
+        assert lyrics is None
+
+    def test_empty_lyrics_after_delimiter_is_none(self):
+        backstory, lyrics = suno_client._split_lyric_box("backstory only+×÷   ")
+        assert backstory == "backstory only"
+        assert lyrics is None
+
+
 class TestMineSongFacts:
     """Test diffing one song's live clip/comments against its artifact for candidate facts."""
 
@@ -239,7 +277,9 @@ class TestMineSongFacts:
             "handle": "scuz_patrol",
             "comment_count": 1,
             "caption": "Track 8",
-            "metadata": {"prompt": "backstory + lyrics blob"},
+            "metadata": {
+                "prompt": "Written after the breakup+×÷it follows, it follows"
+            },
         }
         clip.update(overrides)
         return clip
@@ -270,8 +310,50 @@ class TestMineSongFacts:
             "handle": "alfredokilgore",
             "source": "suno_reply",
             "source_ref": "r1",
+            "category": "lore",
+            "always_canon": True,
         }
         assert "r1" in updated_artifact["cached_comment_ids"]
+
+    def test_reply_from_non_always_canon_handle_is_not_always_canon(self):
+        clip = self._clip(caption=None, metadata={})
+        comments = {
+            "results": [
+                {
+                    "id": "c1",
+                    "content": "nice",
+                    "replies": [
+                        {
+                            "id": "r1",
+                            "user_handle": "metrivus",
+                            "content": "yeah I wrote this part",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        candidates, _ = suno_client.mine_song_facts(clip, comments, {})
+
+        assert candidates[0]["always_canon"] is False
+
+    def test_emoji_only_reply_is_skipped(self):
+        clip = self._clip(caption=None, metadata={})
+        comments = {
+            "results": [
+                {
+                    "id": "c1",
+                    "content": "nice",
+                    "replies": [
+                        {"id": "r1", "user_handle": "alfredokilgore", "content": "🔥"}
+                    ],
+                }
+            ]
+        }
+
+        candidates, _ = suno_client.mine_song_facts(clip, comments, {})
+
+        assert candidates == []
 
     def test_extracts_new_caption_as_candidate(self):
         clip = self._clip(metadata={})
@@ -285,6 +367,8 @@ class TestMineSongFacts:
                 "handle": "scuz_patrol",
                 "source": "suno_caption",
                 "source_ref": "clip1",
+                "category": "lore",
+                "always_canon": True,
             }
         ]
         assert updated_artifact["caption"] == "Track 8"
@@ -298,26 +382,90 @@ class TestMineSongFacts:
 
         assert candidates == []
 
-    def test_extracts_new_lyrics_as_candidate(self):
+    def test_emoji_only_caption_is_skipped(self):
+        clip = self._clip(caption="🔥🔥", metadata={})
+        comments = {"results": []}
+
+        candidates, _ = suno_client.mine_song_facts(clip, comments, {})
+
+        assert candidates == []
+
+    def test_caption_mentioning_contributor_also_yields_credit_candidate(self):
+        clip = self._clip(caption="Vocals by killthrush on this one", metadata={})
+        comments = {"results": []}
+
+        candidates, _ = suno_client.mine_song_facts(clip, comments, {})
+
+        sources = {c["source"] for c in candidates}
+        assert sources == {"suno_caption", "suno_caption_credit"}
+        credit = next(c for c in candidates if c["source"] == "suno_caption_credit")
+        assert credit["category"] == "credit"
+        assert credit["content"] == "Vocals by killthrush on this one"
+
+    def test_caption_without_contributor_mention_has_no_credit_candidate(self):
+        clip = self._clip(caption="Track 8", metadata={})
+        comments = {"results": []}
+
+        candidates, _ = suno_client.mine_song_facts(clip, comments, {})
+
+        assert [c["source"] for c in candidates] == ["suno_caption"]
+
+    def test_extracts_new_backstory_as_lore_candidate(self):
         clip = self._clip(caption=None)
         comments = {"results": []}
 
         candidates, updated_artifact = suno_client.mine_song_facts(clip, comments, {})
 
-        assert candidates == [
+        backstory_candidates = [
+            c for c in candidates if c["source"] == "suno_backstory"
+        ]
+        assert backstory_candidates == [
             {
-                "content": "backstory + lyrics blob",
+                "content": "Written after the breakup",
                 "handle": "scuz_patrol",
-                "source": "suno_lyrics",
+                "source": "suno_backstory",
                 "source_ref": "clip1",
+                "category": "lore",
+                "always_canon": True,
             }
         ]
-        assert updated_artifact["lyrics"] == "backstory + lyrics blob"
+        assert updated_artifact["backstory"] == "Written after the breakup"
 
-    def test_unchanged_lyrics_is_not_a_candidate(self):
+    def test_extracts_new_lyrics_as_lyrics_candidate(self):
         clip = self._clip(caption=None)
         comments = {"results": []}
-        artifact = {"lyrics": "backstory + lyrics blob"}
+
+        candidates, updated_artifact = suno_client.mine_song_facts(clip, comments, {})
+
+        lyrics_candidates = [c for c in candidates if c["source"] == "suno_lyrics_text"]
+        assert lyrics_candidates == [
+            {
+                "content": "it follows, it follows",
+                "handle": "scuz_patrol",
+                "source": "suno_lyrics_text",
+                "source_ref": "clip1",
+                "category": "lyrics",
+                "always_canon": False,
+            }
+        ]
+        assert updated_artifact["lyrics_text"] == "it follows, it follows"
+
+    def test_no_delimiter_produces_backstory_only_no_lyrics_candidate(self):
+        clip = self._clip(caption=None, metadata={"prompt": "just a backstory blurb"})
+        comments = {"results": []}
+
+        candidates, updated_artifact = suno_client.mine_song_facts(clip, comments, {})
+
+        assert [c["source"] for c in candidates] == ["suno_backstory"]
+        assert updated_artifact["lyrics_text"] is None
+
+    def test_unchanged_backstory_and_lyrics_are_not_candidates(self):
+        clip = self._clip(caption=None)
+        comments = {"results": []}
+        artifact = {
+            "backstory": "Written after the breakup",
+            "lyrics_text": "it follows, it follows",
+        }
 
         candidates, _ = suno_client.mine_song_facts(clip, comments, artifact)
 
@@ -326,7 +474,11 @@ class TestMineSongFacts:
     def test_updated_artifact_reflects_all_current_values_even_with_no_candidates(self):
         clip = self._clip()
         comments = {"results": []}
-        artifact = {"caption": "Track 8", "lyrics": "backstory + lyrics blob"}
+        artifact = {
+            "caption": "Track 8",
+            "backstory": "Written after the breakup",
+            "lyrics_text": "it follows, it follows",
+        }
 
         candidates, updated_artifact = suno_client.mine_song_facts(
             clip, comments, artifact
@@ -335,7 +487,8 @@ class TestMineSongFacts:
         assert candidates == []
         assert updated_artifact["comment_count"] == 1
         assert updated_artifact["caption"] == "Track 8"
-        assert updated_artifact["lyrics"] == "backstory + lyrics blob"
+        assert updated_artifact["backstory"] == "Written after the breakup"
+        assert updated_artifact["lyrics_text"] == "it follows, it follows"
 
 
 class TestEnqueueSong:

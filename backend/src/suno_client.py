@@ -51,6 +51,24 @@ PROFILE_HANDLES = {"scuz_patrol", "alfredokilgore"}
 # which profile's song they're replying under.
 CANON_HANDLES = {"scuz_patrol", "alfredokilgore", "metrivus", "killthrush", "lubonit84"}
 
+# scuz_patrol and alfredokilgore never speak out of character -- scuz_patrol
+# is written as a future historical-archive bot, alfredokilgore as the man
+# himself -- so their captions/backstory/replies skip the lore/question/
+# neither classification gate entirely (Claude is still asked for a section,
+# just not for permission). The remaining canon handles are the real people
+# behind the project commenting as themselves, not necessarily in character,
+# so they keep going through the normal gate.
+ALWAYS_CANON_HANDLES = {"scuz_patrol", "alfredokilgore"}
+
+# Real-person contributors who show up in captions as credits ("performed by
+# X"), not as lore.
+CREDIT_HANDLES = CANON_HANDLES - ALWAYS_CANON_HANDLES
+
+# Suno bundles a written backstory blurb and the actual song lyrics into one
+# metadata.prompt field, separated by this delimiter. Lyrics are worth
+# recording (for reference) but never belong in the canon doc.
+LYRICS_DELIMITER = "+×÷"
+
 SONG_ARTIFACT_PREFIX = "songs/"
 
 
@@ -171,67 +189,134 @@ def save_song_artifact(clip_id: str, artifact: Dict[str, Any]) -> None:
     )
 
 
+def _is_trivial(text: Optional[str]) -> bool:
+    """True for empty/whitespace/emoji-or-punctuation-only content.
+
+    A canon-voice account reacting to a fan comment with just an emoji isn't
+    a lore drop -- cheap enough to filter before spending a Claude call on it.
+    """
+    if not text or not text.strip():
+        return True
+    return not any(ch.isalnum() for ch in text)
+
+
+def _split_lyric_box(prompt: str) -> Tuple[str, Optional[str]]:
+    """Split Suno's lyric box into (backstory, lyrics) on LYRICS_DELIMITER.
+
+    Falls back to treating the whole field as backstory if the delimiter
+    isn't present (older/malformed prompts).
+    """
+    if LYRICS_DELIMITER in prompt:
+        backstory, _, lyrics = prompt.partition(LYRICS_DELIMITER)
+        return backstory.strip(), (lyrics.strip() or None)
+    return prompt.strip(), None
+
+
 def mine_song_facts(
     clip: Dict[str, Any], comments: Dict[str, Any], artifact: Dict[str, Any]
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Diff one song's live data against its last-seen artifact for candidate facts.
 
-    Checks three sources: canon-voice comment replies (as before), the clip's
-    caption, and its "lyric box" (metadata.prompt -- Suno bundles a written
-    backstory blurb and the actual lyrics into this one field; not split
-    further here since the delimiter between them isn't reliable enough to
-    parse). Each candidate still needs classification by the caller (this
-    module has no Claude dependency) before being written to the fact store.
+    Checks three sources: canon-voice comment replies, the clip's caption,
+    and its "lyric box" (metadata.prompt, split into backstory + lyrics on
+    LYRICS_DELIMITER). Each candidate is tagged with a "category" (lore,
+    lyrics, or credit) and, for lore candidates, an "always_canon" flag for
+    handles that never speak out of character -- the caller uses these to
+    decide whether/how to classify before writing to the fact store.
 
     Returns:
         (candidates, updated_artifact) where each candidate is
-        {"content", "handle", "source", "source_ref"} and updated_artifact
-        should be saved regardless of whether any candidate became a fact,
-        so unchanged content isn't re-checked on the next pass.
+        {"content", "handle", "source", "source_ref", "category",
+        "always_canon"} and updated_artifact should be saved regardless of
+        whether any candidate became a fact, so unchanged content isn't
+        re-checked on the next pass.
     """
     clip_id = clip["id"]
+    handle = clip.get("handle")
     candidates: List[Dict[str, Any]] = []
 
     seen_ids = set(artifact.get("cached_comment_ids", []))
     for reply in extract_new_canon_replies(comments, seen_ids):
+        if _is_trivial(reply["content"]):
+            continue
         candidates.append(
             {
                 "content": reply["content"],
                 "handle": reply["handle"],
                 "source": "suno_reply",
                 "source_ref": reply["reply_id"],
+                "category": "lore",
+                "always_canon": reply["handle"] in ALWAYS_CANON_HANDLES,
             }
         )
 
     caption = clip.get("caption")
-    if caption and caption != artifact.get("caption"):
+    if caption and caption != artifact.get("caption") and not _is_trivial(caption):
         candidates.append(
             {
                 "content": caption,
-                "handle": clip.get("handle"),
+                "handle": handle,
                 "source": "suno_caption",
                 "source_ref": clip_id,
+                "category": "lore",
+                "always_canon": handle in ALWAYS_CANON_HANDLES,
+            }
+        )
+        caption_lower = caption.lower()
+        if any(credit_handle in caption_lower for credit_handle in CREDIT_HANDLES):
+            candidates.append(
+                {
+                    "content": caption,
+                    "handle": handle,
+                    "source": "suno_caption_credit",
+                    "source_ref": clip_id,
+                    "category": "credit",
+                    "always_canon": False,
+                }
+            )
+
+    lyric_box = clip.get("metadata", {}).get("prompt")
+    backstory: Optional[str] = None
+    lyrics_text: Optional[str] = None
+    if lyric_box:
+        backstory, lyrics_text = _split_lyric_box(lyric_box)
+
+    if (
+        backstory
+        and backstory != artifact.get("backstory")
+        and not _is_trivial(backstory)
+    ):
+        candidates.append(
+            {
+                "content": backstory,
+                "handle": handle,
+                "source": "suno_backstory",
+                "source_ref": clip_id,
+                "category": "lore",
+                "always_canon": handle in ALWAYS_CANON_HANDLES,
             }
         )
 
-    lyrics = clip.get("metadata", {}).get("prompt")
-    if lyrics and lyrics != artifact.get("lyrics"):
+    if lyrics_text and lyrics_text != artifact.get("lyrics_text"):
         candidates.append(
             {
-                "content": lyrics,
-                "handle": clip.get("handle"),
-                "source": "suno_lyrics",
+                "content": lyrics_text,
+                "handle": handle,
+                "source": "suno_lyrics_text",
                 "source_ref": clip_id,
+                "category": "lyrics",
+                "always_canon": False,
             }
         )
 
     updated_artifact = {
         "title": clip.get("title"),
-        "handle": clip.get("handle"),
+        "handle": handle,
         "comment_count": clip.get("comment_count", 0),
         "cached_comment_ids": _all_comment_ids(comments),
         "caption": caption,
-        "lyrics": lyrics,
+        "backstory": backstory,
+        "lyrics_text": lyrics_text,
     }
 
     return candidates, updated_artifact

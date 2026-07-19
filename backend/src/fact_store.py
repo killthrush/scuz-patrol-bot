@@ -27,6 +27,13 @@ STATUS_PENDING = "pending"
 STATUS_INTEGRATED = "integrated"
 STATUS_SUPERSEDED = "superseded"
 
+# What a fact is for, not just where it came from -- lets reconstruction fold
+# "lore" into the canon doc while leaving "lyrics" and "credit" facts
+# recorded-but-untouched (never appended anywhere).
+CATEGORY_LORE = "lore"
+CATEGORY_LYRICS = "lyrics"
+CATEGORY_CREDIT = "credit"
+
 _serializer = TypeSerializer()
 _deserializer = TypeDeserializer()
 
@@ -53,6 +60,7 @@ def put_fact(
     source: str,
     source_ref: str,
     classification: Optional[str] = None,
+    category: str = CATEGORY_LORE,
 ) -> Dict[str, Any]:
     """Write a new fact to the store.
 
@@ -65,6 +73,9 @@ def put_fact(
         source_ref: An ID tying the fact back to its origin (Discord message/
             interaction ID, Suno reply ID) for audit/traceability.
         classification: Raw intent classification, kept for audit.
+        category: What this fact is for -- CATEGORY_LORE facts get folded
+            into the canon doc on reconstruction; CATEGORY_LYRICS and
+            CATEGORY_CREDIT are recorded but never appended anywhere.
 
     Raises:
         ValueError: If content exceeds MAX_FACT_LENGTH characters.
@@ -82,6 +93,7 @@ def put_fact(
         "source": source,
         "source_ref": source_ref,
         "classification": classification or "",
+        "category": category,
         "ingested_at": datetime.now(timezone.utc).isoformat(),
         "status": STATUS_PENDING,
     }

@@ -256,6 +256,16 @@ resource "aws_lambda_function" "reconstruct" {
   architectures = ["x86_64"]
   publish       = true
 
+  # Reconstruction rewrites whole doc sections from a single synthesized
+  # snapshot -- two overlapping runs racing on the same sections (each
+  # working from its own stale read) can overwrite one another's writes,
+  # even though each run's own fact-accounting bookkeeping looks internally
+  # consistent. Capping concurrency at 1 makes AWS throttle any second
+  # invocation while one is in flight; since EventBridge Scheduler invokes
+  # this function asynchronously, a throttled attempt gets automatically
+  # retried by Lambda rather than silently dropped.
+  reserved_concurrent_executions = 1
+
   image_uri    = "${aws_ecr_repository.bot.repository_url}:latest"
   package_type = "Image"
 

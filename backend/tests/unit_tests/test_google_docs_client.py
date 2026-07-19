@@ -30,6 +30,21 @@ def body_paragraph(text: str, start: int, end: int) -> dict:
     }
 
 
+def phantom_heading(start: int, end: int) -> dict:
+    """Build a mock empty paragraph that carries a HEADING style with no
+    text -- can happen when insertText at a heading's edge causes the new
+    paragraph break to inherit the adjacent heading's style. Must never be
+    treated as a real section boundary."""
+    return {
+        "startIndex": start,
+        "endIndex": end,
+        "paragraph": {
+            "elements": [{"textRun": {"content": "\n"}}],
+            "paragraphStyle": {"namedStyleType": "HEADING_2"},
+        },
+    }
+
+
 @pytest.fixture
 def mock_service():
     """Mock the Google Docs API service."""
@@ -126,6 +141,28 @@ class TestAppendToSection:
         insert_request = batch_call.kwargs["body"]["requests"][0]["insertText"]
         assert insert_request["location"]["index"] == 15
 
+    def test_phantom_empty_heading_styled_paragraph_is_not_a_boundary(
+        self, client, mock_service
+    ):
+        """A stray empty paragraph that inherited a HEADING style (e.g. left
+        behind by a previous insert) must not be mistaken for the section's
+        end -- otherwise real content past it gets skipped over."""
+        content = [
+            heading("Band Chronology\n", 1, 18),
+            phantom_heading(18, 19),
+            body_paragraph("Real existing content.\n", 19, 43),
+            heading("Open Threads\n", 43, 57),
+        ]
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
+
+        client.append_to_section("New lore", "Band Chronology")
+
+        batch_call = mock_service.documents().batchUpdate.call_args
+        insert_request = batch_call.kwargs["body"]["requests"][0]["insertText"]
+        assert insert_request["location"]["index"] == 43
+
 
 class TestReplaceSectionContent:
     """Test wholesale section-body replacement used by doc reconstruction."""
@@ -200,6 +237,36 @@ class TestReplaceSectionContent:
             client.replace_section_content("Nonexistent Section", "New content")
 
         assert not mock_service.documents().batchUpdate.called
+
+    def test_phantom_empty_heading_styled_paragraph_is_not_a_boundary(
+        self, client, mock_service
+    ):
+        """Regression test for a real corruption: a stray empty paragraph
+        that inherited a HEADING style (left behind by a previous
+        insertText at a heading's edge) was being treated as the section's
+        end, computing a zero-length range. The delete got skipped (since
+        end == start), so every subsequent "replace" actually just prepended
+        new content in front of the old body forever instead of replacing it.
+        """
+        content = [
+            heading("Band Chronology\n", 1, 18),
+            phantom_heading(18, 19),
+            body_paragraph("Old content that must be deleted.\n", 19, 54),
+            heading("Open Threads\n", 54, 68),
+        ]
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
+
+        client.replace_section_content("Band Chronology", "New complete body")
+
+        batch_call = mock_service.documents().batchUpdate.call_args
+        requests = batch_call.kwargs["body"]["requests"]
+        assert requests[0]["deleteContentRange"]["range"] == {
+            "startIndex": 18,
+            "endIndex": 54,
+        }
+        assert requests[1]["insertText"]["location"]["index"] == 18
 
     def test_matches_section_case_insensitively(self, client, mock_service):
         content = [

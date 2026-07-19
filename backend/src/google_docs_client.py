@@ -138,6 +138,24 @@ class GoogleDocsClient:
             logger.error(f"Failed to append to document: {e}")
             raise
 
+    def _heading_text(self, paragraph: Dict[str, Any]) -> Optional[str]:
+        """Return a paragraph's heading text, or None if it isn't a real heading.
+
+        A heading-styled paragraph with no actual text isn't a real section
+        boundary -- inserting text right at a heading's edge can leave
+        behind an empty paragraph that inherits the adjacent heading's style
+        (namedStyleType HEADING_2 etc.) despite having no heading content.
+        Treating that phantom as a real heading corrupts every boundary
+        calculation downstream of it (e.g. computing a zero-length section
+        range, silently turning a "replace this section" into "prepend to
+        it forever").
+        """
+        style = paragraph.get("paragraphStyle", {}).get("namedStyleType", "")
+        if not style.startswith("HEADING"):
+            return None
+        text = self._extract_text_from_element(paragraph).strip()
+        return text or None
+
     def append_to_section(self, text: str, section: str) -> None:
         """Insert new lore text at the end of a named section.
 
@@ -162,8 +180,8 @@ class GoogleDocsClient:
                 if not paragraph:
                     continue
 
-                style = paragraph.get("paragraphStyle", {}).get("namedStyleType", "")
-                if not style.startswith("HEADING"):
+                heading_text = self._heading_text(paragraph)
+                if heading_text is None:
                     continue
 
                 if in_target_section:
@@ -171,7 +189,6 @@ class GoogleDocsClient:
                     insert_index = element["startIndex"]
                     break
 
-                heading_text = self._extract_text_from_element(paragraph).strip()
                 if heading_text.lower() == section.strip().lower():
                     in_target_section = True
 
@@ -228,15 +245,14 @@ class GoogleDocsClient:
             if not paragraph:
                 continue
 
-            style = paragraph.get("paragraphStyle", {}).get("namedStyleType", "")
-            if not style.startswith("HEADING"):
+            heading_text = self._heading_text(paragraph)
+            if heading_text is None:
                 continue
 
             if in_target_section:
                 end_index = element["startIndex"]
                 break
 
-            heading_text = self._extract_text_from_element(paragraph).strip()
             if heading_text.lower() == section.strip().lower():
                 in_target_section = True
                 start_index = element["endIndex"]

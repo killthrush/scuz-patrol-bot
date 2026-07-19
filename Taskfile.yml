@@ -78,7 +78,17 @@ tasks:
         VERSION=$(aws lambda publish-version --function-name {{.FUNCTION_NAME}} --query 'Version' --output text)
         echo "Published version $VERSION"
         aws lambda update-alias --function-name {{.FUNCTION_NAME}} --name live --function-version "$VERSION"
-        echo "Alias 'live' now points to version $VERSION (provisioned concurrency will re-warm in the background)"
+        echo "Alias 'live' now points to version $VERSION"
+        echo "Waiting for provisioned concurrency to migrate to version $VERSION..."
+        echo "(traffic can still hit the previous version's warm instances until this finishes)"
+        while true; do
+          STATUS=$(aws lambda get-provisioned-concurrency-config --function-name {{.FUNCTION_NAME}} --qualifier live --query 'Status' --output text 2>/dev/null || echo "PENDING")
+          if [ "$STATUS" = "READY" ]; then
+            echo "✓ Version $VERSION is fully warm and serving traffic"
+            break
+          fi
+          sleep 5
+        done
     vars:
       REPO_URL:
         sh: task describe:infra:dev | jq -r '.image_repo.value.url'

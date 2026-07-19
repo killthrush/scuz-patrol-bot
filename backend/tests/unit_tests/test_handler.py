@@ -487,6 +487,66 @@ class TestLoreWorker:
         sent_json = mock_patch.call_args.kwargs["json"]
         assert "Failed to save" in sent_json["embeds"][0]["description"]
 
+    def test_records_lore_submission_as_a_fact_on_success(self, mock_clients):
+        with patch("src.handler.requests.patch"), patch(
+            "src.handler.fact_store.put_fact"
+        ) as mock_put_fact:
+            lambda_handler(
+                {
+                    "source": "discord_lore_worker",
+                    "text": "Kilgore joined in 2020",
+                    "section": "Band Members",
+                    "submitted_by": "killthrush",
+                    "interaction_token": "tok",
+                },
+                None,
+            )
+
+        mock_put_fact.assert_called_once_with(
+            content="Kilgore joined in 2020",
+            section_hint="Band Members",
+            handle="killthrush",
+            source="discord_lore",
+            source_ref="tok",
+            category="lore",
+        )
+
+    def test_fact_not_recorded_when_doc_write_fails(self, mock_clients):
+        mock_clients["docs"].append_to_section.side_effect = Exception("API error")
+
+        with patch("src.handler.requests.patch"), patch(
+            "src.handler.fact_store.put_fact"
+        ) as mock_put_fact:
+            lambda_handler(
+                {
+                    "source": "discord_lore_worker",
+                    "text": "Kilgore joined in 2020",
+                    "section": "Band Members",
+                    "interaction_token": "tok",
+                },
+                None,
+            )
+
+        assert not mock_put_fact.called
+
+    def test_fact_store_failure_does_not_affect_success_message(self, mock_clients):
+        with patch("src.handler.requests.patch") as mock_patch, patch(
+            "src.handler.fact_store.put_fact", side_effect=Exception("DynamoDB error")
+        ):
+            response = lambda_handler(
+                {
+                    "source": "discord_lore_worker",
+                    "text": "Kilgore joined in 2020",
+                    "section": "Band Members",
+                    "interaction_token": "tok",
+                },
+                None,
+            )
+
+        assert response["statusCode"] == 200
+        sent_json = mock_patch.call_args.kwargs["json"]
+        assert "Added to" in sent_json["embeds"][0]["description"]
+
     def test_missing_fields_skips_processing(self, mock_clients):
         with patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(

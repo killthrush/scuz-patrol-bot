@@ -302,6 +302,22 @@ def _handle_lore_worker(event: Dict[str, Any]) -> Dict[str, Any]:
         docs = GoogleDocsClient()
         docs.append_to_section(text, section)
         status_line = f"✅ Added to **{section}**."
+
+        # Also record this as a fact -- purely additive to the immediate doc
+        # write above (kept so /ask sees new lore right away, a common
+        # workflow), so this content is part of the corpus reconstruction
+        # draws from later instead of being invisible to the fact store.
+        try:
+            fact_store.put_fact(
+                content=text,
+                section_hint=section,
+                handle=submitted_by,
+                source="discord_lore",
+                source_ref=interaction_token,
+                category=fact_store.CATEGORY_LORE,
+            )
+        except Exception as e:
+            logger.error(f"Failed to record /lore submission as a fact: {e}")
     except Exception as e:
         logger.error(f"Failed to write lore to canon doc: {e}")
         status_line = "⚠️ Failed to save this to the canon doc. Please try again."

@@ -55,6 +55,37 @@ class TestFetchHelpers:
         assert "gen/clip1/comments" in called_url
 
 
+class TestRateLimitRetry:
+    """Suno's API rate limits us -- verify we back off and retry instead of dropping data."""
+
+    def test_retries_on_429_then_succeeds(self, mock_requests_get, monkeypatch):
+        monkeypatch.setattr("src.suno_client.time.sleep", lambda _: None)
+
+        rate_limited = Mock(status_code=429)
+        success = Mock(status_code=200)
+        success.json.return_value = {"clips": []}
+        mock_requests_get.side_effect = [rate_limited, success]
+
+        result = suno_client.fetch_profile("scuz_patrol")
+
+        assert result == {"clips": []}
+        assert mock_requests_get.call_count == 2
+
+    def test_raises_after_exhausting_retries(self, mock_requests_get, monkeypatch):
+        monkeypatch.setattr("src.suno_client.time.sleep", lambda _: None)
+
+        import requests as real_requests
+
+        rate_limited = Mock(status_code=429)
+        rate_limited.raise_for_status.side_effect = real_requests.exceptions.HTTPError("429")
+        mock_requests_get.return_value = rate_limited
+
+        with pytest.raises(real_requests.exceptions.HTTPError):
+            suno_client.fetch_profile("alfredokilgore")
+
+        assert mock_requests_get.call_count == suno_client.MAX_RETRIES
+
+
 class TestFetchProfilesParallel:
     """Test concurrent profile fetching."""
 
@@ -240,7 +271,6 @@ class TestRefresh:
         }
 
         with patch("src.suno_client.load_manifest", return_value={}), \
-             patch("src.suno_client.save_manifest") as mock_save, \
              patch("src.suno_client.fetch_profiles_parallel", return_value=profiles), \
              patch("src.suno_client.fetch_clip_data_parallel", return_value=clip_data):
             result = suno_client.refresh(handles={"scuz_patrol"})
@@ -251,9 +281,13 @@ class TestRefresh:
         assert result["new_lore_drops"][0]["content"] == "wrote this in prison"
         assert result["new_lore_drops"][0]["handle"] == "alfredokilgore"
 
-        saved_manifest = mock_save.call_args.args[0]
-        assert saved_manifest["clip1"]["comment_count"] == 2
-        assert "r1" in saved_manifest["clip1"]["cached_comment_ids"]
+        # refresh() must NOT persist the manifest itself -- the caller only
+        # saves it after successfully handling new_lore_drops, so a crash/
+        # timeout mid-processing can't silently mark drops "seen" without
+        # ever surfacing them.
+        updated_manifest = result["manifest"]
+        assert updated_manifest["clip1"]["comment_count"] == 2
+        assert "r1" in updated_manifest["clip1"]["cached_comment_ids"]
 
     def test_no_flagged_clips_means_no_lore_drops(self, monkeypatch):
         monkeypatch.setenv("MANIFEST_BUCKET", "test-bucket")
@@ -262,7 +296,6 @@ class TestRefresh:
         manifest = {"clip1": {"comment_count": 2, "cached_comment_ids": []}}
 
         with patch("src.suno_client.load_manifest", return_value=manifest), \
-             patch("src.suno_client.save_manifest") as mock_save, \
              patch("src.suno_client.fetch_profiles_parallel", return_value=profiles), \
              patch("src.suno_client.fetch_clip_data_parallel") as mock_fetch_clips:
             result = suno_client.refresh(handles={"scuz_patrol"})
@@ -270,4 +303,4 @@ class TestRefresh:
         assert result["clips_checked"] == 0
         assert result["new_lore_drops"] == []
         mock_fetch_clips.assert_called_once_with([])
-        mock_save.assert_called_once()
+        assert result["manifest"] == manifest

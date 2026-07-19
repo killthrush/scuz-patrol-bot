@@ -17,6 +17,7 @@ docstring. This module's new-lore detection follows the same pattern.
 import json
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Set
 
@@ -28,6 +29,8 @@ logger = logging.getLogger()
 SUNO_API_BASE = "https://studio-api-prod.suno.com/api"
 SUNO_HEADERS = {"User-Agent": "Mozilla/5.0"}
 REQUEST_TIMEOUT = 15
+MAX_RETRIES = 3
+CLIP_FETCH_CONCURRENCY = 3
 
 # Suno profiles that actually post songs -- these are the ones checked for
 # new clips. scuz_patrol is the band's account; alfredokilgore is an
@@ -43,31 +46,37 @@ CANON_HANDLES = {"scuz_patrol", "alfredokilgore", "metrivus", "killthrush", "lub
 MANIFEST_KEY = "manifest.json"
 
 
+def _get_json(url: str) -> Dict[str, Any]:
+    """GET a Suno API URL, retrying with backoff on rate limiting (429)."""
+    for attempt in range(MAX_RETRIES):
+        response = requests.get(url, headers=SUNO_HEADERS, timeout=REQUEST_TIMEOUT)
+        if response.status_code == 429 and attempt < MAX_RETRIES - 1:
+            wait = 2 ** attempt
+            logger.warning(f"Rate limited fetching {url}, retrying in {wait}s")
+            time.sleep(wait)
+            continue
+        response.raise_for_status()
+        return response.json()
+    raise AssertionError("unreachable")  # loop always returns or raises
+
+
 def fetch_profile(handle: str) -> Dict[str, Any]:
     """Fetch a Suno profile's clips (id, title, comment_count, ...)."""
     url = (
         f"{SUNO_API_BASE}/profiles/{handle}"
         "?playlists_sort_by=upvote_count&clips_sort_by=created_at"
     )
-    response = requests.get(url, headers=SUNO_HEADERS, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    return response.json()
+    return _get_json(url)
 
 
 def fetch_clip(clip_id: str) -> Dict[str, Any]:
     """Fetch one clip's metadata."""
-    url = f"{SUNO_API_BASE}/clip/{clip_id}"
-    response = requests.get(url, headers=SUNO_HEADERS, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    return response.json()
+    return _get_json(f"{SUNO_API_BASE}/clip/{clip_id}")
 
 
 def fetch_comments(clip_id: str) -> Dict[str, Any]:
     """Fetch one clip's comments (including nested replies)."""
-    url = f"{SUNO_API_BASE}/gen/{clip_id}/comments?order=newest"
-    response = requests.get(url, headers=SUNO_HEADERS, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    return response.json()
+    return _get_json(f"{SUNO_API_BASE}/gen/{clip_id}/comments?order=newest")
 
 
 def fetch_profiles_parallel(handles: Set[str]) -> Dict[str, Dict[str, Any]]:
@@ -110,7 +119,7 @@ def fetch_clip_data_parallel(clip_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     def _fetch_one(clip_id: str):
         return clip_id, fetch_clip(clip_id), fetch_comments(clip_id)
 
-    with ThreadPoolExecutor(max_workers=min(len(clip_ids), 8)) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(clip_ids), CLIP_FETCH_CONCURRENCY)) as executor:
         futures = [executor.submit(_fetch_one, cid) for cid in clip_ids]
         for future in as_completed(futures):
             try:
@@ -179,11 +188,18 @@ def save_manifest(manifest: Dict[str, Any]) -> None:
 
 
 def refresh(handles: Optional[Set[str]] = None) -> Dict[str, Any]:
-    """Check song-posting Suno profiles for new songs/lore drops, updating the manifest.
+    """Check song-posting Suno profiles for new songs/lore drops.
 
     Fetches all profiles in parallel, diffs against the manifest to find only
     what's new or changed, fetches those clips' full data in parallel, then
     extracts new lore drops (replies from canon-voice handles not seen before).
+
+    Deliberately does NOT persist the manifest -- the caller should call
+    save_manifest() with the returned "manifest" only *after* successfully
+    handling new_lore_drops. Marking comment ids "seen" before they've
+    actually been surfaced would silently lose any drops not yet processed
+    if the caller crashes or times out midway (e.g. a large first-ever run
+    with far more drops than fit in one Lambda invocation).
 
     Returns:
         {
@@ -191,10 +207,12 @@ def refresh(handles: Optional[Set[str]] = None) -> Dict[str, Any]:
             "clips_checked": int,
             "new_lore_drops": [{"clip_id", "title", "handle", "reply_id", "content",
                                  "parent_content", "created_at"}],
+            "manifest": <updated manifest, not yet saved>,
         }
     """
     handles = handles or PROFILE_HANDLES
     manifest = load_manifest()
+    updated_manifest = dict(manifest)
 
     profiles = fetch_profiles_parallel(handles)
     flagged = find_flagged_clips(profiles, manifest)
@@ -216,7 +234,7 @@ def refresh(handles: Optional[Set[str]] = None) -> Dict[str, Any]:
         for reply in extract_new_canon_replies(comments, seen_ids):
             new_lore_drops.append({"clip_id": clip_id, "title": clip.get("title"), **reply})
 
-        manifest[clip_id] = {
+        updated_manifest[clip_id] = {
             "title": clip.get("title"),
             "handle": clip.get("handle"),
             "created_at": clip.get("created_at"),
@@ -224,10 +242,9 @@ def refresh(handles: Optional[Set[str]] = None) -> Dict[str, Any]:
             "cached_comment_ids": _all_comment_ids(comments),
         }
 
-    save_manifest(manifest)
-
     return {
         "profiles_checked": len(profiles),
         "clips_checked": len(flagged),
         "new_lore_drops": new_lore_drops,
+        "manifest": updated_manifest,
     }

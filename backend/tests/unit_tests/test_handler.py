@@ -412,9 +412,12 @@ class TestSongRefreshWorker:
     """Test the async worker that checks Suno and surfaces new lore drops."""
 
     def test_no_new_drops_sends_summary_only(self, mock_clients):
-        refresh_result = {'profiles_checked': 5, 'clips_checked': 0, 'new_lore_drops': []}
+        refresh_result = {
+            'profiles_checked': 5, 'clips_checked': 0, 'new_lore_drops': [], 'manifest': {},
+        }
 
         with patch('src.handler.suno_client.refresh', return_value=refresh_result), \
+             patch('src.handler.suno_client.save_manifest') as mock_save, \
              patch('src.handler.requests.patch') as mock_patch, \
              patch('src.handler.requests.post') as mock_post:
             response = lambda_handler({
@@ -426,6 +429,7 @@ class TestSongRefreshWorker:
         assert not mock_post.called
         summary = mock_patch.call_args.kwargs['json']['content']
         assert "0 new lore drop" in summary
+        mock_save.assert_called_once_with({})
 
     def test_new_lore_drop_posts_echo_and_confirm_buttons(self, mock_clients):
         mock_clients['claude'].classify_intent.return_value = {
@@ -437,9 +441,14 @@ class TestSongRefreshWorker:
             'clip_id': 'clip1', 'title': 'Incarcerator', 'handle': 'alfredokilgore',
             'reply_id': 'r1', 'content': 'wrote this in prison', 'parent_content': 'nice',
         }]
-        refresh_result = {'profiles_checked': 5, 'clips_checked': 1, 'new_lore_drops': drops}
+        updated_manifest = {'clip1': {'comment_count': 3}}
+        refresh_result = {
+            'profiles_checked': 5, 'clips_checked': 1, 'new_lore_drops': drops,
+            'manifest': updated_manifest,
+        }
 
         with patch('src.handler.suno_client.refresh', return_value=refresh_result), \
+             patch('src.handler.suno_client.save_manifest') as mock_save, \
              patch('src.handler.requests.patch'), \
              patch('src.handler.requests.post') as mock_post:
             response = lambda_handler({
@@ -456,6 +465,10 @@ class TestSongRefreshWorker:
         assert fields['Section'] == 'Band Members'
         assert fields['Lore'] == 'wrote this in prison'
 
+        # Manifest is only saved AFTER every drop was successfully posted --
+        # confirms the save happens post-loop, not before (see suno_client.refresh).
+        mock_save.assert_called_once_with(updated_manifest)
+
     def test_non_lore_drop_only_echoed(self, mock_clients):
         mock_clients['claude'].classify_intent.return_value = {'intent': 'neither'}
         mock_clients['docs'].read_document.return_value = "Canon doc"
@@ -464,9 +477,12 @@ class TestSongRefreshWorker:
             'clip_id': 'clip1', 'title': 'Incarcerator', 'handle': 'alfredokilgore',
             'reply_id': 'r1', 'content': 'lol nice comment', 'parent_content': 'nice',
         }]
-        refresh_result = {'profiles_checked': 5, 'clips_checked': 1, 'new_lore_drops': drops}
+        refresh_result = {
+            'profiles_checked': 5, 'clips_checked': 1, 'new_lore_drops': drops, 'manifest': {},
+        }
 
         with patch('src.handler.suno_client.refresh', return_value=refresh_result), \
+             patch('src.handler.suno_client.save_manifest'), \
              patch('src.handler.requests.patch'), \
              patch('src.handler.requests.post') as mock_post:
             lambda_handler({'source': 'discord_song_refresh_worker', 'interaction_token': 'tok'}, None)
@@ -476,6 +492,7 @@ class TestSongRefreshWorker:
 
     def test_refresh_failure_sends_error_summary(self, mock_clients):
         with patch('src.handler.suno_client.refresh', side_effect=Exception("Suno API down")), \
+             patch('src.handler.suno_client.save_manifest') as mock_save, \
              patch('src.handler.requests.patch') as mock_patch, \
              patch('src.handler.requests.post') as mock_post:
             response = lambda_handler({
@@ -487,6 +504,7 @@ class TestSongRefreshWorker:
         assert not mock_post.called
         content = mock_patch.call_args.kwargs['json']['content']
         assert "Failed to check" in content
+        assert not mock_save.called
 
     def test_missing_interaction_token_returns_400(self, mock_clients):
         response = lambda_handler({'source': 'discord_song_refresh_worker'}, None)

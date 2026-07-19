@@ -403,6 +403,16 @@ def _handle_song_refresh_worker(event: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 _send_discord_new_message(interaction_token, echo)
 
+    # Only persist the manifest after every drop has actually been posted.
+    # If this Lambda times out or crashes mid-loop above, execution never
+    # reaches here, so unprocessed drops stay unmarked and get found again
+    # (and reposted) on the next refresh -- a duplicate is far better than
+    # silently losing lore that was never surfaced.
+    try:
+        suno_client.save_manifest(result['manifest'])
+    except Exception as e:
+        logger.error(f"Failed to save Suno manifest: {e}")
+
     plural = "s" if len(drops) != 1 else ""
     summary = (
         f"🔄 Checked {result.get('profiles_checked', 0)} profile(s), "

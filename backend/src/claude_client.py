@@ -360,7 +360,7 @@ Respond with JSON matching this schema:
 
             response = self.client.messages.create(  # type: ignore
                 model=self.synthesis_model,
-                max_tokens=16384,
+                max_tokens=32000,
                 system=[
                     {
                         "type": "text",

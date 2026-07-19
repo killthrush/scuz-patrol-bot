@@ -28,6 +28,11 @@ class ClaudeClient:
 
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = "claude-haiku-4-5-20251001"
+        # Reserved for doc-reconstruction section synthesis (not yet built) --
+        # that's generative prose work that has to hold a consistent voice and
+        # reliably not drop facts, a higher bar than the label-picking
+        # classify_intent/answer_question do today, which stay on Haiku.
+        self.synthesis_model = "claude-sonnet-5"
 
     def classify_intent(
         self,

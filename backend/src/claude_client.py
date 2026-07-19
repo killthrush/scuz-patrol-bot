@@ -360,7 +360,7 @@ Respond with JSON matching this schema:
 
             response = self.client.messages.create(  # type: ignore
                 model=self.synthesis_model,
-                max_tokens=8192,
+                max_tokens=16384,
                 system=[
                     {
                         "type": "text",
@@ -376,6 +376,13 @@ Respond with JSON matching this schema:
                 ],
             )
 
+            if response.stop_reason == "max_tokens":
+                logger.warning(
+                    "synthesize_doc hit max_tokens before finishing -- output is "
+                    "likely truncated/empty. Consider raising max_tokens or "
+                    "reducing facts/doc size for this run."
+                )
+
             response_text = _extract_text(response)
             if response_text.startswith("```"):
                 response_text = response_text.split("```")[1]
@@ -383,7 +390,16 @@ Respond with JSON matching this schema:
                     response_text = response_text[4:]
                 response_text = response_text.strip()
 
-            result = json.loads(response_text)
+            try:
+                result = json.loads(response_text)
+            except json.JSONDecodeError:
+                block_types = [getattr(b, "type", "?") for b in response.content]
+                logger.error(
+                    f"synthesize_doc got unparseable response text "
+                    f"({len(response_text)} chars); stop_reason="
+                    f"{response.stop_reason}, content block types={block_types}"
+                )
+                raise
 
             usage = response.usage
             logger.info(

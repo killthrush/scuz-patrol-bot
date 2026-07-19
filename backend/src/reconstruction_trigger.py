@@ -5,7 +5,7 @@ pointed at the same image as the main bot handler -- see reconstruct_handler
 in handler.py and the aws_lambda_function.reconstruct Terraform resource).
 It's invoked by a one-time EventBridge Schedule rather than a fixed interval:
 every successful fact write pushes the schedule's fire time out by
-DEBOUNCE_MINUTES. Since creating a schedule with a name that already exists
+DEBOUNCE_SECONDS. Since creating a schedule with a name that already exists
 just moves its fire time, a burst of facts (e.g. one /refresh-songs run
 queuing many songs) collapses into a single reconstruction once things go
 quiet, instead of one run per fact.
@@ -20,11 +20,11 @@ import boto3
 
 logger = logging.getLogger()
 
-DEBOUNCE_MINUTES = 5
+DEBOUNCE_SECONDS = 30
 
 
 def schedule_reconstruction(now: Optional[datetime] = None) -> None:
-    """Push the reconstruction debounce schedule out by DEBOUNCE_MINUTES.
+    """Push the reconstruction debounce schedule out by DEBOUNCE_SECONDS.
 
     Creates the one-time EventBridge Schedule if it doesn't exist yet,
     otherwise updates its fire time. Callers should treat failures here as
@@ -41,7 +41,7 @@ def schedule_reconstruction(now: Optional[datetime] = None) -> None:
             "RECONSTRUCT_SCHEDULER_ROLE_ARN must all be set"
         )
 
-    fire_at = (now or datetime.now(timezone.utc)) + timedelta(minutes=DEBOUNCE_MINUTES)
+    fire_at = (now or datetime.now(timezone.utc)) + timedelta(seconds=DEBOUNCE_SECONDS)
     schedule_expression = f"at({fire_at.strftime('%Y-%m-%dT%H:%M:%S')})"
 
     scheduler = boto3.client("scheduler")

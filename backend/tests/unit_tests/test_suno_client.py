@@ -230,7 +230,7 @@ class TestSongArtifactStorage:
 
 
 class TestIsTrivial:
-    """Test the emoji/whitespace-only content filter."""
+    """Test the emoji/whitespace/Suno-shoutout content filter."""
 
     def test_empty_and_whitespace_are_trivial(self):
         assert suno_client._is_trivial("")
@@ -244,6 +244,18 @@ class TestIsTrivial:
     def test_real_text_is_not_trivial(self):
         assert not suno_client._is_trivial("wrote this in prison")
         assert not suno_client._is_trivial("🔥 nice track")
+
+    def test_short_suno_platform_mention_is_trivial(self):
+        assert suno_client._is_trivial("made with Suno!")
+        assert suno_client._is_trivial("check out suno.com")
+        assert suno_client._is_trivial("Generated on SUNO AI")
+
+    def test_long_content_mentioning_suno_in_passing_is_not_trivial(self):
+        content = (
+            "Made this whole thing on Suno but here's the real story: "
+            "Kilgore wrote this after the breakup, in one sitting, at 4am."
+        )
+        assert not suno_client._is_trivial(content)
 
 
 class TestSplitLyricBox:

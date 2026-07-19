@@ -43,7 +43,7 @@ class TestScheduleReconstruction:
         mock_scheduler_client.update_schedule.assert_called_once()
         call_kwargs = mock_scheduler_client.update_schedule.call_args.kwargs
         assert call_kwargs["Name"] == "test-reconstruct-debounce"
-        assert call_kwargs["ScheduleExpression"] == "at(2026-07-19T12:05:00)"
+        assert call_kwargs["ScheduleExpression"] == "at(2026-07-19T12:00:30)"
         assert call_kwargs["Target"] == {
             "Arn": "arn:aws:lambda:us-east-1:123:function:reconstruct",
             "RoleArn": "arn:aws:iam::123:role/scheduler-role",
@@ -62,7 +62,7 @@ class TestScheduleReconstruction:
         mock_scheduler_client.create_schedule.assert_called_once()
         call_kwargs = mock_scheduler_client.create_schedule.call_args.kwargs
         assert call_kwargs["Name"] == "test-reconstruct-debounce"
-        assert call_kwargs["ScheduleExpression"] == "at(2026-07-19T12:05:00)"
+        assert call_kwargs["ScheduleExpression"] == "at(2026-07-19T12:00:30)"
 
     def test_raises_without_required_env_vars(self, monkeypatch):
         monkeypatch.delenv("RECONSTRUCT_SCHEDULE_NAME", raising=False)

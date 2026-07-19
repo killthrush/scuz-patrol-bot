@@ -189,15 +189,28 @@ def save_song_artifact(clip_id: str, artifact: Dict[str, Any]) -> None:
     )
 
 
+_SUNO_MENTION_MAX_LENGTH = 60
+
+
 def _is_trivial(text: Optional[str]) -> bool:
-    """True for empty/whitespace/emoji-or-punctuation-only content.
+    """True for empty/whitespace/emoji-only content, or a short Suno-platform
+    shout-out ("made with Suno!", "check out suno.com").
 
     A canon-voice account reacting to a fan comment with just an emoji isn't
-    a lore drop -- cheap enough to filter before spending a Claude call on it.
+    a lore drop, and Suno is a real-world tool never referenced in-universe --
+    any short mention of it is meta noise, not lore. Both are cheap to filter
+    before spending a Claude call on them. The length gate on the Suno check
+    is deliberate: a long comment that happens to mention Suno in passing
+    might still contain real lore alongside it, so only short mentions (where
+    that's plausibly the whole point) get filtered.
     """
     if not text or not text.strip():
         return True
-    return not any(ch.isalnum() for ch in text)
+    if not any(ch.isalnum() for ch in text):
+        return True
+    if len(text) <= _SUNO_MENTION_MAX_LENGTH and "suno" in text.lower():
+        return True
+    return False
 
 
 def _split_lyric_box(prompt: str) -> Tuple[str, Optional[str]]:

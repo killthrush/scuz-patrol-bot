@@ -1,3 +1,13 @@
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+locals {
+  # Fixed name -- every fact write just pushes this one schedule's fire time
+  # back (see reconstruction_trigger.py), rather than creating a new
+  # schedule per fact.
+  reconstruct_schedule_name = "${var.function_name}-reconstruct-debounce"
+}
+
 # IAM role for Lambda
 resource "aws_iam_role" "lambda_role" {
   name = "${var.function_name}-role"
@@ -231,6 +241,108 @@ resource "aws_iam_role_policy" "lambda_song_queue" {
   })
 }
 
+# --- Canon doc reconstruction (debounced fact-store -> Google Doc job) ---
+#
+# Runs as its own Lambda function so it can be triggered independently of
+# Discord webhook traffic, but shares the same container image as the main
+# bot -- Terraform just points its container command at a different handler
+# in the same codebase, so no second image build/push is needed.
+
+resource "aws_lambda_function" "reconstruct" {
+  function_name = "${var.function_name}-reconstruct"
+  role          = aws_iam_role.lambda_role.arn
+  timeout       = var.timeout
+  memory_size   = var.memory_size
+  architectures = ["x86_64"]
+  publish       = true
+
+  image_uri    = "${aws_ecr_repository.bot.repository_url}:latest"
+  package_type = "Image"
+
+  image_config {
+    command = ["src.handler.reconstruct_handler"]
+  }
+
+  environment {
+    variables = {
+      LOG_LEVEL     = "INFO"
+      GOOGLE_DOC_ID = var.reconstruct_doc_id
+      FACTS_TABLE   = aws_dynamodb_table.facts.name
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_logs
+  ]
+}
+
+resource "aws_cloudwatch_log_group" "reconstruct_logs" {
+  name              = "/aws/lambda/${aws_lambda_function.reconstruct.function_name}"
+  retention_in_days = 7
+}
+
+# EventBridge Scheduler assumes this role to invoke the reconstruction
+# Lambda -- scheduler targets are invoked via an IAM role, not a
+# resource-based Lambda permission like API Gateway/EventBridge Rules use.
+resource "aws_iam_role" "scheduler_role" {
+  name = "${var.function_name}-scheduler-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "scheduler.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "scheduler_invoke_reconstruct" {
+  name = "${var.function_name}-scheduler-invoke-policy"
+  role = aws_iam_role.scheduler_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["lambda:InvokeFunction"]
+      Resource = [aws_lambda_function.reconstruct.arn]
+    }]
+  })
+}
+
+# Lets the main bot Lambda create/push-back the one-time debounce schedule
+# (see reconstruction_trigger.py). Scoped to the single fixed schedule name
+# above, plus PassRole for the scheduler's own execution role.
+resource "aws_iam_role_policy" "lambda_reconstruct_scheduler" {
+  name = "${var.function_name}-reconstruct-scheduler-policy"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "scheduler:CreateSchedule",
+          "scheduler:UpdateSchedule",
+          "scheduler:GetSchedule",
+        ]
+        Resource = [
+          "arn:aws:scheduler:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:schedule/default/${local.reconstruct_schedule_name}"
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
+        Resource = [aws_iam_role.scheduler_role.arn]
+      }
+    ]
+  })
+}
+
 # ECR repository for Lambda container images
 resource "aws_ecr_repository" "bot" {
   name                 = "${var.function_name}-repo"
@@ -256,11 +368,14 @@ resource "aws_lambda_function" "bot" {
 
   environment {
     variables = {
-      LOG_LEVEL       = "INFO"
-      GOOGLE_DOC_ID   = var.google_doc_id
-      MANIFEST_BUCKET = aws_s3_bucket.manifest.bucket
-      FACTS_TABLE     = aws_dynamodb_table.facts.name
-      SONG_QUEUE_URL  = aws_sqs_queue.song_ingest.url
+      LOG_LEVEL                      = "INFO"
+      GOOGLE_DOC_ID                  = var.google_doc_id
+      MANIFEST_BUCKET                = aws_s3_bucket.manifest.bucket
+      FACTS_TABLE                    = aws_dynamodb_table.facts.name
+      SONG_QUEUE_URL                 = aws_sqs_queue.song_ingest.url
+      RECONSTRUCT_LAMBDA_ARN         = aws_lambda_function.reconstruct.arn
+      RECONSTRUCT_SCHEDULER_ROLE_ARN = aws_iam_role.scheduler_role.arn
+      RECONSTRUCT_SCHEDULE_NAME      = local.reconstruct_schedule_name
     }
   }
 

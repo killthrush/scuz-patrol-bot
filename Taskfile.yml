@@ -66,7 +66,7 @@ tasks:
     silent: false
 
   "deploy:backend:dev":
-    desc: "Push image, update Lambda code, publish a version, and move the 'live' alias to it"
+    desc: "Push image, update both Lambdas' code, publish a version, and move the 'live' alias to it"
     dir: "{{.USER_WORKING_DIR}}"
     cmds:
       - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin {{.REPO_URL}}
@@ -83,11 +83,17 @@ tasks:
         echo "Traffic can still hit the PREVIOUS version's code during that window -- check"
         echo "'aws lambda get-provisioned-concurrency-config --function-name {{.FUNCTION_NAME}} --qualifier live'"
         echo "for Status=READY before relying on new behavior being live."
+      # Reconstruction Lambda shares this same image but has no alias/provisioned
+      # concurrency of its own -- a plain code update against $LATEST is enough.
+      - aws lambda update-function-code --function-name {{.RECONSTRUCT_FUNCTION_NAME}} --image-uri {{.REPO_URL}}:latest
+      - aws lambda wait function-updated --function-name {{.RECONSTRUCT_FUNCTION_NAME}}
     vars:
       REPO_URL:
         sh: task describe:infra:dev | jq -r '.image_repo.value.url'
       FUNCTION_NAME:
         sh: task describe:infra:dev | jq -r '.lambda_function.value.name'
+      RECONSTRUCT_FUNCTION_NAME:
+        sh: task describe:infra:dev | jq -r '.reconstruct_lambda.value.name'
     silent: false
 
   "describe:infra:dev":

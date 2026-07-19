@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
+from src import reconstruction_trigger
+
 logger = logging.getLogger()
 
 MAX_FACT_LENGTH = 2000
@@ -86,6 +88,12 @@ def put_fact(
 
     client = boto3.client("dynamodb")
     client.put_item(TableName=_table_name(), Item=_to_item(fact))
+
+    try:
+        reconstruction_trigger.schedule_reconstruction()
+    except Exception as e:
+        logger.error(f"Failed to schedule reconstruction debounce: {e}")
+
     return fact
 
 

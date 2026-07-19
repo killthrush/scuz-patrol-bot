@@ -83,6 +83,36 @@ class TestPutFact:
                 source_ref="msg123",
             )
 
+    def test_pushes_back_reconstruction_debounce_on_success(self, mock_dynamo_client):
+        with patch(
+            "src.fact_store.reconstruction_trigger.schedule_reconstruction"
+        ) as mock_schedule:
+            fact_store.put_fact(
+                content="Kilgore joined in 2020",
+                section_hint="Band Members",
+                handle="killthrush",
+                source="discord_lore",
+                source_ref="msg123",
+            )
+
+        mock_schedule.assert_called_once()
+
+    def test_write_succeeds_even_if_debounce_scheduling_fails(self, mock_dynamo_client):
+        with patch(
+            "src.fact_store.reconstruction_trigger.schedule_reconstruction",
+            side_effect=ValueError("RECONSTRUCT_LAMBDA_ARN not set"),
+        ):
+            fact = fact_store.put_fact(
+                content="Kilgore joined in 2020",
+                section_hint="Band Members",
+                handle="killthrush",
+                source="discord_lore",
+                source_ref="msg123",
+            )
+
+        assert fact["content"] == "Kilgore joined in 2020"
+        assert mock_dynamo_client.put_item.called
+
 
 class TestGetPendingFacts:
     """Test querying facts not yet integrated into the canon doc."""

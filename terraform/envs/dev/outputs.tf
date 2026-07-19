@@ -43,3 +43,11 @@ output "song_queue" {
   description = "SQS FIFO queue for per-song ingest processing"
   value       = aws_sqs_queue.song_ingest.url
 }
+
+output "reconstruct_lambda" {
+  description = "Reconstruction Lambda function name and other details"
+  value = {
+    name = aws_lambda_function.reconstruct.function_name
+    arn  = aws_lambda_function.reconstruct.arn
+  }
+}

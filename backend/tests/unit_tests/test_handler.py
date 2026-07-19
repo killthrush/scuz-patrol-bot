@@ -3,7 +3,7 @@
 import json
 import pytest
 from unittest.mock import Mock, patch
-from src.handler import lambda_handler
+from src.handler import lambda_handler, reconstruct_handler
 
 
 @pytest.fixture
@@ -830,6 +830,67 @@ class TestSongQueueWorker:
 
         assert response["statusCode"] == 200
         assert mock_save_artifact.call_count == 2
+
+
+class TestReconstructHandler:
+    """Test the debounced reconstruction Lambda: folds pending facts into the doc."""
+
+    def test_no_pending_facts_is_a_noop(self, mock_clients):
+        with patch("src.handler.fact_store.get_pending_facts", return_value=[]):
+            response = reconstruct_handler({}, None)
+
+        assert response["statusCode"] == 200
+        assert not mock_clients["docs_class"].called
+
+    def test_integrates_each_pending_fact_into_its_section(self, mock_clients):
+        pending = [
+            {
+                "fact_id": "f1",
+                "content": "Kilgore joined in 2020",
+                "section_hint": "Band Members",
+            },
+            {
+                "fact_id": "f2",
+                "content": "Wrote this after the breakup",
+                "section_hint": "Band Chronology",
+            },
+        ]
+
+        with patch(
+            "src.handler.fact_store.get_pending_facts", return_value=pending
+        ), patch("src.handler.fact_store.mark_integrated") as mock_mark_integrated:
+            response = reconstruct_handler({}, None)
+
+        assert response["statusCode"] == 200
+        assert mock_clients["docs"].append_to_section.call_count == 2
+        mock_clients["docs"].append_to_section.assert_any_call(
+            "Kilgore joined in 2020", "Band Members"
+        )
+        mock_clients["docs"].append_to_section.assert_any_call(
+            "Wrote this after the breakup", "Band Chronology"
+        )
+        assert mock_mark_integrated.call_count == 2
+        assert mock_mark_integrated.call_args_list[0].args[0] == "f1"
+        assert mock_mark_integrated.call_args_list[1].args[0] == "f2"
+
+    def test_one_fact_failure_does_not_block_others(self, mock_clients):
+        pending = [
+            {"fact_id": "f1", "content": "bad fact", "section_hint": "Band Members"},
+            {"fact_id": "f2", "content": "good fact", "section_hint": "Band Members"},
+        ]
+        mock_clients["docs"].append_to_section.side_effect = [
+            Exception("Docs API error"),
+            None,
+        ]
+
+        with patch(
+            "src.handler.fact_store.get_pending_facts", return_value=pending
+        ), patch("src.handler.fact_store.mark_integrated") as mock_mark_integrated:
+            response = reconstruct_handler({}, None)
+
+        assert response["statusCode"] == 200
+        assert mock_mark_integrated.call_count == 1
+        assert mock_mark_integrated.call_args.args[0] == "f2"
 
 
 class TestHandlerErrorHandling:

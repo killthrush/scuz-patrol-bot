@@ -16,6 +16,7 @@ import os
 import logging
 import boto3
 import requests  # type: ignore
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
@@ -526,6 +527,39 @@ def _handle_sqs_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     for record in records:
         message = json.loads(record["body"])
         _process_song_queue_message(message)
+    return {"statusCode": 200}
+
+
+def reconstruct_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Entry point for the reconstruction Lambda -- a separate function from
+    the main bot, but sharing this same container image (Terraform points
+    its container command at this handler specifically).
+
+    Triggered by the one-time EventBridge Schedule that
+    reconstruction_trigger.schedule_reconstruction() pushes back on every
+    fact write, so this only runs once a burst of new facts goes quiet.
+
+    First-pass reconstruction: fold each pending fact into its section via
+    a plain append (same primitive /lore already uses), then mark it
+    integrated. Purely additive -- no existing doc content is rewritten or
+    deleted -- so a bad fact can't destroy prior canon. A real "rebuild the
+    whole doc from all non-superseded facts" pass is future work.
+    """
+    pending = fact_store.get_pending_facts()
+    if not pending:
+        logger.info("Reconstruction triggered with no pending facts, nothing to do")
+        return {"statusCode": 200}
+
+    docs = GoogleDocsClient()
+    doc_version = datetime.now(timezone.utc).isoformat()
+
+    for fact in pending:
+        try:
+            docs.append_to_section(fact["content"], fact["section_hint"])
+            fact_store.mark_integrated(fact["fact_id"], doc_version)
+        except Exception as e:
+            logger.error(f"Failed to integrate fact {fact['fact_id']}: {e}")
+
     return {"statusCode": 200}
 
 

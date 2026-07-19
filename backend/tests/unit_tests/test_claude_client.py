@@ -3,7 +3,7 @@
 import json
 import pytest
 from unittest.mock import Mock, patch
-from src.claude_client import ClaudeClient
+from src.claude_client import ClaudeClient, _extract_text
 
 
 @pytest.fixture
@@ -11,6 +11,39 @@ def mock_anthropic():
     """Mock the Anthropic client."""
     with patch("src.claude_client.anthropic.Anthropic") as mock:
         yield mock
+
+
+class TestExtractText:
+    """response.content[0].text isn't safe to assume -- some models return a
+    thinking block before their text block, and .text on that returns None
+    rather than raising, which fails confusingly downstream instead of at
+    the actual point of error."""
+
+    def test_single_text_block(self):
+        response = Mock(content=[Mock(type="text", text="hello")])
+        assert _extract_text(response) == "hello"
+
+    def test_skips_leading_thinking_block(self):
+        response = Mock(
+            content=[
+                Mock(type="thinking", text=None),
+                Mock(type="text", text="the actual answer"),
+            ]
+        )
+        assert _extract_text(response) == "the actual answer"
+
+    def test_concatenates_multiple_text_blocks(self):
+        response = Mock(
+            content=[
+                Mock(type="text", text="part one "),
+                Mock(type="text", text="part two"),
+            ]
+        )
+        assert _extract_text(response) == "part one part two"
+
+    def test_strips_surrounding_whitespace(self):
+        response = Mock(content=[Mock(type="text", text="  padded  ")])
+        assert _extract_text(response) == "padded"
 
 
 class TestClaudeClientInit:
@@ -49,7 +82,7 @@ class TestClassifyIntent:
         # Mock the API response
         response_text = '{"intent": "question", "confidence": 0.95, "reasoning": "asking about lore"}'
         mock_response = Mock()
-        mock_response.content = [Mock(text=response_text)]
+        mock_response.content = [Mock(text=response_text, type="text")]
         mock_response.usage = Mock(
             input_tokens=100,
             output_tokens=50,
@@ -76,7 +109,7 @@ class TestClassifyIntent:
             '"Band Members", "reasoning": "providing new info"}'
         )
         mock_response = Mock()
-        mock_response.content = [Mock(text=response_text)]
+        mock_response.content = [Mock(text=response_text, type="text")]
         mock_response.usage = Mock(
             input_tokens=100,
             output_tokens=50,
@@ -101,7 +134,8 @@ class TestClassifyIntent:
         mock_response = Mock()
         mock_response.content = [
             Mock(
-                text='{"intent": "neither", "confidence": 0.92, "reasoning": "off-topic"}'
+                text='{"intent": "neither", "confidence": 0.92, "reasoning": "off-topic"}',
+                type="text",
             )
         ]
         mock_response.usage = Mock(
@@ -126,7 +160,7 @@ class TestClassifyIntent:
 
         response_text = '```json\n{"intent": "question", "confidence": 0.9, "reasoning": "asking"}\n```'
         mock_response = Mock()
-        mock_response.content = [Mock(text=response_text)]
+        mock_response.content = [Mock(text=response_text, type="text")]
         mock_response.usage = Mock(
             input_tokens=100,
             output_tokens=50,
@@ -152,7 +186,10 @@ class TestClassifyIntent:
 
         mock_response = Mock()
         mock_response.content = [
-            Mock(text='{"intent": "neither", "confidence": 0.5, "reasoning": "n/a"}')
+            Mock(
+                text='{"intent": "neither", "confidence": 0.5, "reasoning": "n/a"}',
+                type="text",
+            )
         ]
         mock_response.usage = Mock(
             input_tokens=1,
@@ -180,7 +217,7 @@ class TestClassifyIntent:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
-        mock_response.content = [Mock(text="not valid json")]
+        mock_response.content = [Mock(text="not valid json", type="text")]
         mock_response.usage = Mock(
             input_tokens=100,
             output_tokens=50,
@@ -211,7 +248,10 @@ class TestSuggestSection:
 
         mock_response = Mock()
         mock_response.content = [
-            Mock(text='{"section": "Band Chronology", "reasoning": "mentions a date"}')
+            Mock(
+                text='{"section": "Band Chronology", "reasoning": "mentions a date"}',
+                type="text",
+            )
         ]
         mock_response.usage = Mock(
             input_tokens=100,
@@ -235,7 +275,7 @@ class TestSuggestSection:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
-        mock_response.content = [Mock(text="not valid json")]
+        mock_response.content = [Mock(text="not valid json", type="text")]
         mock_response.usage = Mock(
             input_tokens=100,
             output_tokens=50,
@@ -258,7 +298,7 @@ class TestSuggestSection:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
-        mock_response.content = [Mock(text='{"reasoning": "unsure"}')]
+        mock_response.content = [Mock(text='{"reasoning": "unsure"}', type="text")]
         mock_response.usage = Mock(
             input_tokens=100,
             output_tokens=50,
@@ -281,7 +321,7 @@ class TestSuggestSection:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
-        mock_response.content = [Mock(text='{"section": "Band Members"}')]
+        mock_response.content = [Mock(text='{"section": "Band Members"}', type="text")]
         mock_response.usage = Mock(
             input_tokens=1,
             output_tokens=1,
@@ -347,7 +387,7 @@ class TestSynthesizeDoc:
             }
         )
         mock_response = Mock()
-        mock_response.content = [Mock(text=response_text)]
+        mock_response.content = [Mock(text=response_text, type="text")]
         mock_response.usage = Mock(
             input_tokens=500,
             output_tokens=200,
@@ -372,7 +412,7 @@ class TestSynthesizeDoc:
 
         mock_response = Mock()
         mock_response.content = [
-            Mock(text='{"doc_sections": [], "fact_accounting": []}')
+            Mock(text='{"doc_sections": [], "fact_accounting": []}', type="text")
         ]
         mock_response.usage = Mock(
             input_tokens=1,
@@ -396,7 +436,7 @@ class TestSynthesizeDoc:
 
         mock_response = Mock()
         mock_response.content = [
-            Mock(text='{"doc_sections": [], "fact_accounting": []}')
+            Mock(text='{"doc_sections": [], "fact_accounting": []}', type="text")
         ]
         mock_response.usage = Mock(
             input_tokens=1,
@@ -424,7 +464,7 @@ class TestSynthesizeDoc:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
-        mock_response.content = [Mock(text="{}")]
+        mock_response.content = [Mock(text="{}", type="text")]
         mock_response.usage = Mock(
             input_tokens=1,
             output_tokens=1,
@@ -444,7 +484,7 @@ class TestSynthesizeDoc:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
-        mock_response.content = [Mock(text="not valid json")]
+        mock_response.content = [Mock(text="not valid json", type="text")]
         mock_response.usage = Mock(
             input_tokens=1,
             output_tokens=1,
@@ -469,7 +509,7 @@ class TestAnswerQuestion:
 
         answer_text = "Scuz is a fictional band formed in 2020, as documented in the Virtual Discography section."
         mock_response = Mock()
-        mock_response.content = [Mock(text=answer_text)]
+        mock_response.content = [Mock(text=answer_text, type="text")]
         mock_response.usage = Mock(
             input_tokens=500,
             output_tokens=100,
@@ -493,7 +533,7 @@ class TestAnswerQuestion:
 
         answer_text = "According to the Virtual Discography, Scuz released their first album in 2021."
         mock_response = Mock()
-        mock_response.content = [Mock(text=answer_text)]
+        mock_response.content = [Mock(text=answer_text, type="text")]
         mock_response.usage = Mock(
             input_tokens=500,
             output_tokens=100,
@@ -519,7 +559,7 @@ class TestAnswerQuestion:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
 
         mock_response = Mock()
-        mock_response.content = [Mock(text="An answer.")]
+        mock_response.content = [Mock(text="An answer.", type="text")]
         mock_response.usage = Mock(
             input_tokens=1, output_tokens=1, cache_read_input_tokens=0
         )

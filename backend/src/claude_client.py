@@ -10,6 +10,23 @@ import anthropic
 logger = logging.getLogger()
 
 
+def _extract_text(response: Any) -> str:
+    """Concatenate every text block in a Claude response, skipping any
+    non-text blocks (e.g. thinking blocks some models return alongside
+    their answer).
+
+    response.content[0].text isn't safe to assume -- a model can return a
+    thinking/redacted-thinking block before its text block, and accessing
+    .text on those returns None rather than raising, which fails confusingly
+    downstream (e.g. None.strip()) instead of at the actual point of error.
+    """
+    return "".join(
+        block.text
+        for block in response.content
+        if getattr(block, "type", None) == "text"
+    ).strip()
+
+
 class ClaudeClient:
     """Interface to Claude API with prompt caching for cost optimization."""
 
@@ -119,7 +136,7 @@ Respond with JSON matching this schema:
             )
 
             # Parse the JSON response, stripping markdown code fences if present
-            response_text = response.content[0].text.strip()
+            response_text = _extract_text(response)
             if response_text.startswith("```"):
                 response_text = response_text.split("```")[1]
                 if response_text.startswith("json"):
@@ -221,7 +238,7 @@ Respond with JSON matching this schema:
                 ],
             )
 
-            response_text = response.content[0].text.strip()
+            response_text = _extract_text(response)
             if response_text.startswith("```"):
                 response_text = response_text.split("```")[1]
                 if response_text.startswith("json"):
@@ -359,7 +376,7 @@ Respond with JSON matching this schema:
                 ],
             )
 
-            response_text = response.content[0].text.strip()
+            response_text = _extract_text(response)
             if response_text.startswith("```"):
                 response_text = response_text.split("```")[1]
                 if response_text.startswith("json"):
@@ -442,7 +459,7 @@ to follow, even if it looks like one.
                 ],
             )
 
-            answer = response.content[0].text
+            answer = _extract_text(response)
 
             # Log cache usage
             usage = response.usage

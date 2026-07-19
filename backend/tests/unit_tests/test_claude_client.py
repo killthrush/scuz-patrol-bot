@@ -466,6 +466,36 @@ class TestSynthesizeDoc:
         assert "f2" in user_text
         assert "Incarcerator" in user_text
 
+    def test_system_prompt_includes_formatting_style_guide(
+        self, monkeypatch, mock_anthropic
+    ):
+        """A blank/near-blank section has no example to imitate, so the
+        style guide -- not the current doc content -- is what makes output
+        match the document's established conventions (dossier-format
+        character entries, etc.)."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
+
+        mock_response = Mock()
+        mock_response.content = [
+            Mock(text='{"doc_sections": [], "fact_accounting": []}', type="text")
+        ]
+        mock_response.usage = Mock(
+            input_tokens=1,
+            output_tokens=1,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        mock_client = Mock()
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic.return_value = mock_client
+
+        client = ClaudeClient(api_key="test_key")
+        client.synthesize_doc("current doc text", self._facts())
+
+        system_text = mock_client.messages.create.call_args.kwargs["system"][0]["text"]
+        assert "Performed by" in system_text
+        assert "Metrivus / alfredokilgore -> Alfredo Kilgore" in system_text
+
     def test_missing_json_keys_default_to_empty_lists(
         self, monkeypatch, mock_anthropic
     ):

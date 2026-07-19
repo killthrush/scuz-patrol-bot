@@ -476,6 +476,7 @@ def _put_candidate_fact(
             source=candidate["source"],
             source_ref=candidate["source_ref"],
             category=candidate["category"],
+            title=candidate.get("title"),
             classification=json.dumps(classification) if classification else None,
         )
     except ValueError as e:
@@ -492,9 +493,11 @@ def _write_candidate(
 
     Lyrics/credit candidates never need classification -- they're recorded
     as-is. Lore from scuz_patrol/alfredokilgore (always_canon) skips the
-    lore/question/neither gate since those accounts never speak out of
-    character, but Claude is still asked for a section suggestion. Everything
-    else goes through the normal gate.
+    lore/question/neither gate entirely since those accounts never speak out
+    of character -- there's no "is this lore?" question to ask them, so
+    Claude is only asked "which section?" (suggest_section), never whether
+    the content counts as lore at all. Everything else goes through the
+    normal lore/question/neither gate.
     """
     if candidate["category"] != fact_store.CATEGORY_LORE:
         section = (
@@ -507,17 +510,17 @@ def _write_candidate(
 
     if candidate.get("always_canon"):
         section = "Unexplored Ideas"
-        classification = None
         if claude is not None and canon_doc is not None:
             try:
-                classification = claude.classify_intent(candidate["content"], canon_doc)
-                section = str(classification.get("suggested_section") or section)
+                section = claude.suggest_section(candidate["content"], canon_doc)
             except Exception as e:
                 logger.error(
                     f"Failed to get section suggestion for {candidate['source']} "
                     f"candidate for song {clip_id}: {e}"
                 )
-        _put_candidate_fact(candidate, section, classification)
+        _put_candidate_fact(
+            candidate, section, {"always_canon": True, "section": section}
+        )
         return
 
     if claude is None or canon_doc is None:

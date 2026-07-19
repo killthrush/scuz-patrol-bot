@@ -312,6 +312,7 @@ class TestMineSongFacts:
             "source_ref": "r1",
             "category": "lore",
             "always_canon": True,
+            "title": "Incarcerator",
         }
         assert "r1" in updated_artifact["cached_comment_ids"]
 
@@ -369,6 +370,7 @@ class TestMineSongFacts:
                 "source_ref": "clip1",
                 "category": "lore",
                 "always_canon": True,
+                "title": "Incarcerator",
             }
         ]
         assert updated_artifact["caption"] == "Track 8"
@@ -427,6 +429,7 @@ class TestMineSongFacts:
                 "source_ref": "clip1",
                 "category": "lore",
                 "always_canon": True,
+                "title": "Incarcerator",
             }
         ]
         assert updated_artifact["backstory"] == "Written after the breakup"
@@ -446,6 +449,7 @@ class TestMineSongFacts:
                 "source_ref": "clip1",
                 "category": "lyrics",
                 "always_canon": False,
+                "title": "Incarcerator",
             }
         ]
         assert updated_artifact["lyrics_text"] == "it follows, it follows"

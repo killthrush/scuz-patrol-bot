@@ -36,12 +36,27 @@ class TestPutFact:
         assert fact["status"] == fact_store.STATUS_PENDING
         assert fact["fact_id"]
         assert fact["ingested_at"]
+        assert fact["title"] == ""
 
         mock_dynamo_client.put_item.assert_called_once()
         call_kwargs = mock_dynamo_client.put_item.call_args.kwargs
         assert call_kwargs["TableName"] == "test-facts-table"
         assert call_kwargs["Item"]["content"]["S"] == "Kilgore joined in 2020"
         assert call_kwargs["Item"]["status"]["S"] == "pending"
+
+    def test_stores_title_when_provided(self, mock_dynamo_client):
+        fact = fact_store.put_fact(
+            content="Kilgore joined in 2020",
+            section_hint="Band Members",
+            handle="scuz_patrol",
+            source="suno_caption",
+            source_ref="clip1",
+            title="Incarcerator",
+        )
+
+        assert fact["title"] == "Incarcerator"
+        call_kwargs = mock_dynamo_client.put_item.call_args.kwargs
+        assert call_kwargs["Item"]["title"]["S"] == "Incarcerator"
 
     def test_rejects_content_over_max_length(self, mock_dynamo_client):
         too_long = "x" * (fact_store.MAX_FACT_LENGTH + 1)

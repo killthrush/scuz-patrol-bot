@@ -61,6 +61,7 @@ def put_fact(
     source_ref: str,
     classification: Optional[str] = None,
     category: str = CATEGORY_LORE,
+    title: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Write a new fact to the store.
 
@@ -76,6 +77,9 @@ def put_fact(
         category: What this fact is for -- CATEGORY_LORE facts get folded
             into the canon doc on reconstruction; CATEGORY_LYRICS and
             CATEGORY_CREDIT are recorded but never appended anywhere.
+        title: Human-readable label for source_ref, e.g. the Suno song title --
+            source_ref alone is an opaque ID, not enough to tell which song a
+            fact came from without a lookup.
 
     Raises:
         ValueError: If content exceeds MAX_FACT_LENGTH characters.
@@ -92,6 +96,7 @@ def put_fact(
         "handle": handle,
         "source": source,
         "source_ref": source_ref,
+        "title": title or "",
         "classification": classification or "",
         "category": category,
         "ingested_at": datetime.now(timezone.utc).isoformat(),

@@ -227,12 +227,13 @@ def mine_song_facts(
     Returns:
         (candidates, updated_artifact) where each candidate is
         {"content", "handle", "source", "source_ref", "category",
-        "always_canon"} and updated_artifact should be saved regardless of
-        whether any candidate became a fact, so unchanged content isn't
-        re-checked on the next pass.
+        "always_canon", "title"} and updated_artifact should be saved
+        regardless of whether any candidate became a fact, so unchanged
+        content isn't re-checked on the next pass.
     """
     clip_id = clip["id"]
     handle = clip.get("handle")
+    title = clip.get("title")
     candidates: List[Dict[str, Any]] = []
 
     seen_ids = set(artifact.get("cached_comment_ids", []))
@@ -247,6 +248,7 @@ def mine_song_facts(
                 "source_ref": reply["reply_id"],
                 "category": "lore",
                 "always_canon": reply["handle"] in ALWAYS_CANON_HANDLES,
+                "title": title,
             }
         )
 
@@ -260,6 +262,7 @@ def mine_song_facts(
                 "source_ref": clip_id,
                 "category": "lore",
                 "always_canon": handle in ALWAYS_CANON_HANDLES,
+                "title": title,
             }
         )
         caption_lower = caption.lower()
@@ -272,6 +275,7 @@ def mine_song_facts(
                     "source_ref": clip_id,
                     "category": "credit",
                     "always_canon": False,
+                    "title": title,
                 }
             )
 
@@ -294,6 +298,7 @@ def mine_song_facts(
                 "source_ref": clip_id,
                 "category": "lore",
                 "always_canon": handle in ALWAYS_CANON_HANDLES,
+                "title": title,
             }
         )
 
@@ -306,6 +311,7 @@ def mine_song_facts(
                 "source_ref": clip_id,
                 "category": "lyrics",
                 "always_canon": False,
+                "title": title,
             }
         )
 

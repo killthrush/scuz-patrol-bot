@@ -653,10 +653,7 @@ class TestSongQueueWorker:
     ):
         monkeypatch.setenv("MANIFEST_BUCKET", "test-bucket")
         monkeypatch.setenv("FACTS_TABLE", "test-facts-table")
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "new_lore",
-            "suggested_section": "Band Members",
-        }
+        mock_clients["claude"].suggest_section.return_value = "Band Members"
         mock_clients["docs"].read_document.return_value = "Canon doc"
 
         comments = {
@@ -699,18 +696,20 @@ class TestSongQueueWorker:
         assert call_kwargs["source_ref"] == "r1"
         assert call_kwargs["section_hint"] == "Band Members"
         assert call_kwargs["category"] == "lore"
+        assert call_kwargs["title"] == "Incarcerator"
         mock_save_artifact.assert_called_once()
         assert mock_save_artifact.call_args.args[0] == "clip1"
+        # always_canon content never asks "is this lore?" -- classify_intent
+        # is reserved for the gated (non-always_canon) path.
+        assert not mock_clients["claude"].classify_intent.called
 
-    def test_always_canon_reply_is_written_even_when_classified_as_neither(
+    def test_always_canon_content_still_written_if_section_suggestion_fails(
         self, mock_clients
     ):
         """alfredokilgore/scuz_patrol never speak out of character -- their
-        words skip the lore/question/neither gate entirely."""
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "neither",
-            "suggested_section": "Band Chronology",
-        }
+        words skip the lore/question/neither gate entirely, and even a
+        failed section suggestion doesn't block the write."""
+        mock_clients["claude"].suggest_section.side_effect = Exception("API error")
         mock_clients["docs"].read_document.return_value = "Canon doc"
 
         comments = {
@@ -745,13 +744,10 @@ class TestSongQueueWorker:
             )
 
         mock_put_fact.assert_called_once()
-        assert mock_put_fact.call_args.kwargs["section_hint"] == "Band Chronology"
+        assert mock_put_fact.call_args.kwargs["section_hint"] == "Unexplored Ideas"
 
     def test_new_caption_is_written_to_fact_store(self, mock_clients):
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "new_lore",
-            "suggested_section": "Band Chronology",
-        }
+        mock_clients["claude"].suggest_section.return_value = "Band Chronology"
         mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
@@ -774,14 +770,12 @@ class TestSongQueueWorker:
         assert call_kwargs["content"] == "Wrote this after the breakup"
         assert call_kwargs["source"] == "suno_caption"
         assert call_kwargs["category"] == "lore"
+        assert call_kwargs["title"] == "Incarcerator"
 
     def test_caption_mentioning_contributor_also_written_as_credit_fact(
         self, mock_clients
     ):
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "new_lore",
-            "suggested_section": "Virtual Discography",
-        }
+        mock_clients["claude"].suggest_section.return_value = "Virtual Discography"
         mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
@@ -850,10 +844,7 @@ class TestSongQueueWorker:
         assert mock_save_artifact.called
 
     def test_lyrics_candidate_is_written_without_classification(self, mock_clients):
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "new_lore",
-            "suggested_section": "Virtual Discography",
-        }
+        mock_clients["claude"].suggest_section.return_value = "Virtual Discography"
         mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
@@ -882,20 +873,19 @@ class TestSongQueueWorker:
         assert by_source["suno_lyrics_text"]["content"] == "actual lyrics here"
         assert by_source["suno_lyrics_text"]["section_hint"] == "Lyrics Archive"
         assert by_source["suno_lyrics_text"]["classification"] is None
-        # Only the backstory candidate needs a classification call -- lyrics
-        # never do.
-        mock_clients["claude"].classify_intent.assert_called_once_with(
+        # Only the backstory candidate needs a section suggestion -- lyrics
+        # never do, and neither ever calls classify_intent (no lore gate for
+        # always_canon content).
+        mock_clients["claude"].suggest_section.assert_called_once_with(
             "Some backstory", "Canon doc"
         )
+        assert not mock_clients["claude"].classify_intent.called
 
     def test_oversized_candidate_is_skipped_not_raised(self, mock_clients):
         from src.fact_store import MAX_FACT_LENGTH
 
         too_long = "x" * (MAX_FACT_LENGTH + 1)
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "new_lore",
-            "suggested_section": "Band Chronology",
-        }
+        mock_clients["claude"].suggest_section.return_value = "Band Chronology"
         mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
@@ -940,10 +930,7 @@ class TestSongQueueWorker:
         assert mock_save_artifact.called
 
     def test_processes_each_record_in_a_batch_independently(self, mock_clients):
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "new_lore",
-            "suggested_section": "Band Chronology",
-        }
+        mock_clients["claude"].suggest_section.return_value = "Band Chronology"
         mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(

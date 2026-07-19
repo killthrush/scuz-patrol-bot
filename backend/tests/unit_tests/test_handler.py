@@ -961,7 +961,17 @@ class TestSongQueueWorker:
 
 
 class TestReconstructHandler:
-    """Test the debounced reconstruction Lambda: folds pending facts into the doc."""
+    """Test the debounced reconstruction Lambda: one-shot doc synthesis from facts."""
+
+    def _lore_fact(self, fact_id, **overrides):
+        fact = {
+            "fact_id": fact_id,
+            "content": "Kilgore joined in 2020",
+            "section_hint": "Band Members",
+            "category": "lore",
+        }
+        fact.update(overrides)
+        return fact
 
     def test_no_pending_facts_is_a_noop(self, mock_clients):
         with patch("src.handler.fact_store.get_pending_facts", return_value=[]):
@@ -969,56 +979,155 @@ class TestReconstructHandler:
 
         assert response["statusCode"] == 200
         assert not mock_clients["docs_class"].called
+        assert not mock_clients["claude_class"].called
 
-    def test_integrates_each_pending_fact_into_its_section(self, mock_clients):
+    def test_only_non_lore_pending_facts_marks_integrated_without_synthesis(
+        self, mock_clients
+    ):
         pending = [
-            {
-                "fact_id": "f1",
-                "content": "Kilgore joined in 2020",
-                "section_hint": "Band Members",
-            },
-            {
-                "fact_id": "f2",
-                "content": "Wrote this after the breakup",
-                "section_hint": "Band Chronology",
-            },
+            {"fact_id": "f1", "content": "lyrics", "category": "lyrics"},
+            {"fact_id": "f2", "content": "credit", "category": "credit"},
         ]
 
         with patch(
             "src.handler.fact_store.get_pending_facts", return_value=pending
-        ), patch("src.handler.fact_store.mark_integrated") as mock_mark_integrated:
+        ), patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction"
+        ) as mock_get_lore, patch(
+            "src.handler.fact_store.mark_integrated"
+        ) as mock_mark_integrated:
             response = reconstruct_handler({}, None)
 
         assert response["statusCode"] == 200
-        assert mock_clients["docs"].append_to_section.call_count == 2
-        mock_clients["docs"].append_to_section.assert_any_call(
-            "Kilgore joined in 2020", "Band Members"
-        )
-        mock_clients["docs"].append_to_section.assert_any_call(
-            "Wrote this after the breakup", "Band Chronology"
+        assert mock_mark_integrated.call_count == 2
+        assert not mock_get_lore.called
+        assert not mock_clients["docs_class"].called
+        assert not mock_clients["claude_class"].called
+
+    def test_successful_synthesis_writes_sections_and_marks_facts_integrated(
+        self, mock_clients
+    ):
+        pending = [self._lore_fact("f1"), self._lore_fact("f2")]
+        mock_clients["docs"].read_document.return_value = "current doc text"
+        mock_clients["claude"].synthesize_doc.return_value = {
+            "doc_sections": [{"name": "Band Members", "content": "new body text"}],
+            "fact_accounting": [
+                {"fact_id": "f1", "status": "included", "section": "Band Members"},
+                {"fact_id": "f2", "status": "already_present", "section": None},
+            ],
+        }
+
+        with patch(
+            "src.handler.fact_store.get_pending_facts", return_value=pending
+        ), patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=pending,
+        ), patch(
+            "src.handler.fact_store.mark_integrated"
+        ) as mock_mark_integrated:
+            response = reconstruct_handler({}, None)
+
+        assert response["statusCode"] == 200
+        mock_clients["docs"].replace_section_content.assert_called_once_with(
+            "Band Members", "new body text"
         )
         assert mock_mark_integrated.call_count == 2
-        assert mock_mark_integrated.call_args_list[0].args[0] == "f1"
-        assert mock_mark_integrated.call_args_list[1].args[0] == "f2"
+        integrated_ids = {c.args[0] for c in mock_mark_integrated.call_args_list}
+        assert integrated_ids == {"f1", "f2"}
 
-    def test_one_fact_failure_does_not_block_others(self, mock_clients):
-        pending = [
-            {"fact_id": "f1", "content": "bad fact", "section_hint": "Band Members"},
-            {"fact_id": "f2", "content": "good fact", "section_hint": "Band Members"},
-        ]
-        mock_clients["docs"].append_to_section.side_effect = [
-            Exception("Docs API error"),
-            None,
-        ]
+    def test_fact_missing_from_accounting_stays_pending(self, mock_clients):
+        pending = [self._lore_fact("f1"), self._lore_fact("f2")]
+        mock_clients["docs"].read_document.return_value = "current doc text"
+        mock_clients["claude"].synthesize_doc.return_value = {
+            "doc_sections": [{"name": "Band Members", "content": "new body text"}],
+            "fact_accounting": [
+                {"fact_id": "f1", "status": "included", "section": "Band Members"},
+                # f2 is silently missing from the accounting.
+            ],
+        }
 
         with patch(
             "src.handler.fact_store.get_pending_facts", return_value=pending
-        ), patch("src.handler.fact_store.mark_integrated") as mock_mark_integrated:
+        ), patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=pending,
+        ), patch(
+            "src.handler.fact_store.mark_integrated"
+        ) as mock_mark_integrated:
             response = reconstruct_handler({}, None)
 
         assert response["statusCode"] == 200
-        assert mock_mark_integrated.call_count == 1
+        mock_mark_integrated.assert_called_once()
+        assert mock_mark_integrated.call_args.args[0] == "f1"
+
+    def test_fact_accounted_for_a_section_that_failed_to_write_stays_pending(
+        self, mock_clients
+    ):
+        pending = [self._lore_fact("f1"), self._lore_fact("f2")]
+        mock_clients["docs"].read_document.return_value = "current doc text"
+        mock_clients["docs"].replace_section_content.side_effect = Exception(
+            "Docs API error"
+        )
+        mock_clients["claude"].synthesize_doc.return_value = {
+            "doc_sections": [{"name": "Band Members", "content": "new body text"}],
+            "fact_accounting": [
+                {"fact_id": "f1", "status": "included", "section": "Band Members"},
+                {"fact_id": "f2", "status": "already_present", "section": None},
+            ],
+        }
+
+        with patch(
+            "src.handler.fact_store.get_pending_facts", return_value=pending
+        ), patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=pending,
+        ), patch(
+            "src.handler.fact_store.mark_integrated"
+        ) as mock_mark_integrated:
+            response = reconstruct_handler({}, None)
+
+        assert response["statusCode"] == 200
+        # f1's section failed to write -- stays pending. f2 was
+        # "already_present" (no section write needed) -- still integrated.
+        mock_mark_integrated.assert_called_once()
         assert mock_mark_integrated.call_args.args[0] == "f2"
+
+    def test_synthesis_failure_leaves_all_facts_pending(self, mock_clients):
+        pending = [self._lore_fact("f1")]
+        mock_clients["docs"].read_document.return_value = "current doc text"
+        mock_clients["claude"].synthesize_doc.side_effect = Exception("API error")
+
+        with patch(
+            "src.handler.fact_store.get_pending_facts", return_value=pending
+        ), patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=pending,
+        ), patch(
+            "src.handler.fact_store.mark_integrated"
+        ) as mock_mark_integrated:
+            response = reconstruct_handler({}, None)
+
+        assert response["statusCode"] == 200
+        assert not mock_mark_integrated.called
+        assert not mock_clients["docs"].replace_section_content.called
+
+    def test_read_document_failure_leaves_all_facts_pending(self, mock_clients):
+        pending = [self._lore_fact("f1")]
+        mock_clients["docs"].read_document.side_effect = Exception("Docs API error")
+
+        with patch(
+            "src.handler.fact_store.get_pending_facts", return_value=pending
+        ), patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=pending,
+        ), patch(
+            "src.handler.fact_store.mark_integrated"
+        ) as mock_mark_integrated:
+            response = reconstruct_handler({}, None)
+
+        assert response["statusCode"] == 200
+        assert not mock_mark_integrated.called
+        assert not mock_clients["claude"].synthesize_doc.called
 
 
 class TestHandlerErrorHandling:

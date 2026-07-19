@@ -164,6 +164,58 @@ class TestGetPendingFacts:
         assert facts == []
 
 
+class TestGetLoreFactsForReconstruction:
+    """Test the full-context query reconstruction synthesizes from."""
+
+    def test_combines_pending_and_integrated_lore_facts(self, mock_dynamo_client):
+        mock_dynamo_client.query.side_effect = [
+            {
+                "Items": [
+                    {
+                        "fact_id": {"S": "f1"},
+                        "content": {"S": "pending fact"},
+                        "status": {"S": "pending"},
+                        "ingested_at": {"S": "2026-01-02T00:00:00+00:00"},
+                    }
+                ]
+            },
+            {
+                "Items": [
+                    {
+                        "fact_id": {"S": "f2"},
+                        "content": {"S": "already integrated fact"},
+                        "status": {"S": "integrated"},
+                        "ingested_at": {"S": "2026-01-01T00:00:00+00:00"},
+                    }
+                ]
+            },
+        ]
+
+        facts = fact_store.get_lore_facts_for_reconstruction()
+
+        assert {f["fact_id"] for f in facts} == {"f1", "f2"}
+        assert mock_dynamo_client.query.call_count == 2
+
+        first_call_kwargs = mock_dynamo_client.query.call_args_list[0].kwargs
+        assert first_call_kwargs["ExpressionAttributeValues"][":status"] == {
+            "S": "pending"
+        }
+        assert first_call_kwargs["ExpressionAttributeValues"][":category"] == {
+            "S": "lore"
+        }
+        second_call_kwargs = mock_dynamo_client.query.call_args_list[1].kwargs
+        assert second_call_kwargs["ExpressionAttributeValues"][":status"] == {
+            "S": "integrated"
+        }
+
+    def test_returns_empty_list_when_no_lore_facts(self, mock_dynamo_client):
+        mock_dynamo_client.query.return_value = {"Items": []}
+
+        facts = fact_store.get_lore_facts_for_reconstruction()
+
+        assert facts == []
+
+
 class TestMarkIntegrated:
     """Test marking a fact as folded into a canon doc rewrite."""
 

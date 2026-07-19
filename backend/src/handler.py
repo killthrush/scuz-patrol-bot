@@ -592,34 +592,79 @@ def reconstruct_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     reconstruction_trigger.schedule_reconstruction() pushes back on every
     fact write, so this only runs once a burst of new facts goes quiet.
 
-    First-pass reconstruction: fold each pending CATEGORY_LORE fact into its
-    section via a plain append (same primitive /lore already uses), then
-    mark it integrated. Purely additive -- no existing doc content is
-    rewritten or deleted -- so a bad fact can't destroy prior canon. Lyrics/
-    credit facts are marked integrated without any doc write -- they're
-    recorded for reference, never folded into canon. A real "rebuild the
-    whole doc from all non-superseded facts" pass is future work.
+    One Claude call synthesizes the *entire* set of non-superseded lore
+    facts (not just newly pending ones) against a fresh read of the current
+    doc, so it can merge coherently, cross-reference across sections, and
+    flag contradictions in-doc instead of guessing -- see
+    ClaudeClient.synthesize_doc. A fact is only marked integrated if it's
+    accounted for AND the section it landed in actually wrote successfully;
+    anything else stays pending for the next debounce cycle to retry, so a
+    partial failure can't silently lose a fact.
+
+    Lyrics/credit facts skip synthesis entirely -- they're recorded for
+    reference, never folded into canon, so they're marked integrated as soon
+    as they're seen.
     """
     pending = fact_store.get_pending_facts()
     if not pending:
         logger.info("Reconstruction triggered with no pending facts, nothing to do")
         return {"statusCode": 200}
 
-    docs: Optional[GoogleDocsClient] = None
     doc_version = datetime.now(timezone.utc).isoformat()
+    pending_lore_ids = set()
 
     for fact in pending:
+        if fact.get("category", fact_store.CATEGORY_LORE) != fact_store.CATEGORY_LORE:
+            try:
+                fact_store.mark_integrated(fact["fact_id"], doc_version)
+            except Exception as e:
+                logger.error(f"Failed to integrate fact {fact['fact_id']}: {e}")
+        else:
+            pending_lore_ids.add(fact["fact_id"])
+
+    if not pending_lore_ids:
+        return {"statusCode": 200}
+
+    all_lore_facts = fact_store.get_lore_facts_for_reconstruction()
+    docs = GoogleDocsClient()
+
+    try:
+        current_doc = docs.read_document()
+        result = ClaudeClient().synthesize_doc(current_doc, all_lore_facts)
+    except Exception as e:
+        logger.error(f"Doc synthesis failed, leaving all pending facts for retry: {e}")
+        return {"statusCode": 200}
+
+    sections_written = set()
+    for section in result["doc_sections"]:
         try:
-            if (
-                fact.get("category", fact_store.CATEGORY_LORE)
-                == fact_store.CATEGORY_LORE
-            ):
-                if docs is None:
-                    docs = GoogleDocsClient()
-                docs.append_to_section(fact["content"], fact["section_hint"])
-            fact_store.mark_integrated(fact["fact_id"], doc_version)
+            docs.replace_section_content(section["name"], section["content"])
+            sections_written.add(section["name"])
         except Exception as e:
-            logger.error(f"Failed to integrate fact {fact['fact_id']}: {e}")
+            logger.error(f"Failed to write section '{section['name']}': {e}")
+
+    accounting_by_id = {item["fact_id"]: item for item in result["fact_accounting"]}
+
+    for fact_id in pending_lore_ids:
+        accounted = accounting_by_id.get(fact_id)
+        if accounted is None:
+            logger.warning(
+                f"Fact {fact_id} missing from synthesis accounting, leaving pending"
+            )
+            continue
+        if (
+            accounted["status"] != "already_present"
+            and accounted.get("section") not in sections_written
+        ):
+            logger.warning(
+                f"Fact {fact_id} accounted for section "
+                f"'{accounted.get('section')}' which failed to write, leaving pending"
+            )
+            continue
+        try:
+            fact_store.mark_integrated(fact_id, doc_version)
+        except Exception as e:
+            logger.error(f"Failed to mark fact {fact_id} integrated: {e}")
 
     return {"statusCode": 200}
 

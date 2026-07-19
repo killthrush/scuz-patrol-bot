@@ -1,5 +1,6 @@
 """Unit tests for Claude API integration (mocked)."""
 
+import json
 import pytest
 from unittest.mock import Mock, patch
 from src.claude_client import ClaudeClient
@@ -301,6 +302,162 @@ class TestSuggestSection:
 
         assert "<canon_compendium>" in system_text
         assert f"<content>\n{malicious_content}\n</content>" in user_text
+
+
+class TestSynthesizeDoc:
+    """Test one-shot doc synthesis from the full non-superseded fact set."""
+
+    def _facts(self):
+        return [
+            {
+                "fact_id": "f1",
+                "content": "Kilgore joined in 2020",
+                "handle": "scuz_patrol",
+                "section_hint": "Band Members",
+                "title": "Incarcerator",
+            },
+            {
+                "fact_id": "f2",
+                "content": "Wrote this after the breakup",
+                "handle": "scuz_patrol",
+                "section_hint": "Band Chronology",
+            },
+        ]
+
+    def test_returns_sections_and_fact_accounting(self, monkeypatch, mock_anthropic):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
+
+        response_text = json.dumps(
+            {
+                "doc_sections": [
+                    {"name": "Band Members", "content": "Updated body text"}
+                ],
+                "fact_accounting": [
+                    {
+                        "fact_id": "f1",
+                        "status": "included",
+                        "section": "Band Members",
+                    },
+                    {
+                        "fact_id": "f2",
+                        "status": "already_present",
+                        "section": None,
+                    },
+                ],
+            }
+        )
+        mock_response = Mock()
+        mock_response.content = [Mock(text=response_text)]
+        mock_response.usage = Mock(
+            input_tokens=500,
+            output_tokens=200,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        mock_client = Mock()
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic.return_value = mock_client
+
+        client = ClaudeClient(api_key="test_key")
+        result = client.synthesize_doc("current doc text", self._facts())
+
+        assert result["doc_sections"] == [
+            {"name": "Band Members", "content": "Updated body text"}
+        ]
+        assert len(result["fact_accounting"]) == 2
+        assert result["fact_accounting"][0]["fact_id"] == "f1"
+
+    def test_uses_synthesis_model_not_default_model(self, monkeypatch, mock_anthropic):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
+
+        mock_response = Mock()
+        mock_response.content = [
+            Mock(text='{"doc_sections": [], "fact_accounting": []}')
+        ]
+        mock_response.usage = Mock(
+            input_tokens=1,
+            output_tokens=1,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        mock_client = Mock()
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic.return_value = mock_client
+
+        client = ClaudeClient(api_key="test_key")
+        client.synthesize_doc("current doc text", self._facts())
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert call_kwargs["model"] == client.synthesis_model
+        assert call_kwargs["model"] != client.model
+
+    def test_every_fact_id_appears_in_the_prompt(self, monkeypatch, mock_anthropic):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
+
+        mock_response = Mock()
+        mock_response.content = [
+            Mock(text='{"doc_sections": [], "fact_accounting": []}')
+        ]
+        mock_response.usage = Mock(
+            input_tokens=1,
+            output_tokens=1,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        mock_client = Mock()
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic.return_value = mock_client
+
+        client = ClaudeClient(api_key="test_key")
+        client.synthesize_doc("current doc text", self._facts())
+
+        user_text = mock_client.messages.create.call_args.kwargs["messages"][0][
+            "content"
+        ]
+        assert "f1" in user_text
+        assert "f2" in user_text
+        assert "Incarcerator" in user_text
+
+    def test_missing_json_keys_default_to_empty_lists(
+        self, monkeypatch, mock_anthropic
+    ):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
+
+        mock_response = Mock()
+        mock_response.content = [Mock(text="{}")]
+        mock_response.usage = Mock(
+            input_tokens=1,
+            output_tokens=1,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        mock_client = Mock()
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic.return_value = mock_client
+
+        client = ClaudeClient(api_key="test_key")
+        result = client.synthesize_doc("current doc text", self._facts())
+
+        assert result == {"doc_sections": [], "fact_accounting": []}
+
+    def test_raises_on_invalid_json_response(self, monkeypatch, mock_anthropic):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
+
+        mock_response = Mock()
+        mock_response.content = [Mock(text="not valid json")]
+        mock_response.usage = Mock(
+            input_tokens=1,
+            output_tokens=1,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        mock_client = Mock()
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic.return_value = mock_client
+
+        client = ClaudeClient(api_key="test_key")
+        with pytest.raises(json.JSONDecodeError):
+            client.synthesize_doc("current doc text", self._facts())
 
 
 class TestAnswerQuestion:

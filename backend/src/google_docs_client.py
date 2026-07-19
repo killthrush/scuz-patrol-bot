@@ -4,7 +4,7 @@ import base64
 import json
 import logging
 import os
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -208,4 +208,103 @@ class GoogleDocsClient:
 
         except Exception as e:
             logger.error(f"Failed to append to section '{section}': {e}")
+            raise
+
+    def _find_section_range(
+        self, content: List[Dict[str, Any]], section: str
+    ) -> Optional[Tuple[int, int]]:
+        """Find (start_index, end_index) spanning a section's body -- from
+        right after its heading through right before the next heading (or
+        the end of the document if it's the last section).
+
+        Returns None if no heading matches `section` (case-insensitive).
+        """
+        start_index = None
+        end_index = None
+        in_target_section = False
+
+        for element in content:
+            paragraph = element.get("paragraph")
+            if not paragraph:
+                continue
+
+            style = paragraph.get("paragraphStyle", {}).get("namedStyleType", "")
+            if not style.startswith("HEADING"):
+                continue
+
+            if in_target_section:
+                end_index = element["startIndex"]
+                break
+
+            heading_text = self._extract_text_from_element(paragraph).strip()
+            if heading_text.lower() == section.strip().lower():
+                in_target_section = True
+                start_index = element["endIndex"]
+
+        if start_index is None:
+            return None
+        if end_index is None:
+            # Target section was the last one in the document.
+            end_index = content[-1]["endIndex"] - 1
+
+        return start_index, end_index
+
+    def replace_section_content(self, section: str, new_content: str) -> None:
+        """Replace a section's entire body with new_content.
+
+        Unlike append_to_section, this deletes the section's existing body
+        (everything from right after its heading through right before the
+        next heading) before inserting -- used by doc reconstruction, which
+        synthesizes a section's complete new text from its full fact
+        history rather than tacking one fact onto the end.
+
+        Re-reads the document fresh on every call rather than relying on
+        indices computed earlier -- safe to call repeatedly for different
+        sections in one reconstruction pass without needing to reason about
+        how an earlier section's edit shifted later indices.
+
+        Raises if the section heading isn't found -- unlike append_to_section,
+        there's no safe fallback here (appending elsewhere would just create
+        a duplicate of content the caller intended to replace).
+        """
+        try:
+            doc = self.service.documents().get(documentId=self.doc_id).execute()
+            content = doc.get("body", {}).get("content", [])
+
+            section_range = self._find_section_range(content, section)
+            if section_range is None:
+                raise ValueError(f"Section '{section}' not found")
+            start_index, end_index = section_range
+
+            requests: List[Dict[str, Any]] = []
+            if end_index > start_index:
+                requests.append(
+                    {
+                        "deleteContentRange": {
+                            "range": {
+                                "startIndex": start_index,
+                                "endIndex": end_index,
+                            }
+                        }
+                    }
+                )
+            requests.append(
+                {
+                    "insertText": {
+                        "text": f"\n{new_content}\n",
+                        "location": {"index": start_index},
+                    }
+                }
+            )
+
+            self.service.documents().batchUpdate(
+                documentId=self.doc_id, body={"requests": requests}
+            ).execute()
+
+            logger.info(
+                f"Replaced section '{section}' with {len(new_content)} characters"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to replace section '{section}': {e}")
             raise

@@ -128,6 +128,35 @@ def get_pending_facts() -> List[Dict[str, Any]]:
     return [_from_item(item) for item in response.get("Items", [])]
 
 
+def get_lore_facts_for_reconstruction() -> List[Dict[str, Any]]:
+    """Return all non-superseded CATEGORY_LORE facts (pending + already-
+    integrated), oldest first.
+
+    Reconstruction synthesizes from the full picture, not just what's newly
+    pending -- that's what lets it merge coherently and cross-reference
+    instead of just tacking new text onto the end of a section. Superseded
+    facts stay excluded; that's the whole point of superseding instead of
+    deleting a retconned fact.
+    """
+    client = boto3.client("dynamodb")
+    facts: List[Dict[str, Any]] = []
+    for status in (STATUS_PENDING, STATUS_INTEGRATED):
+        response = client.query(
+            TableName=_table_name(),
+            IndexName="status-ingested_at-index",
+            KeyConditionExpression="#status = :status",
+            FilterExpression="category = :category",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":status": {"S": status},
+                ":category": {"S": CATEGORY_LORE},
+            },
+            ScanIndexForward=True,
+        )
+        facts.extend(_from_item(item) for item in response.get("Items", []))
+    return facts
+
+
 def mark_integrated(fact_id: str, doc_version: str) -> None:
     """Mark a fact as folded into a specific canon doc rewrite."""
     client = boto3.client("dynamodb")

@@ -125,3 +125,97 @@ class TestAppendToSection:
         batch_call = mock_service.documents().batchUpdate.call_args
         insert_request = batch_call.kwargs["body"]["requests"][0]["insertText"]
         assert insert_request["location"]["index"] == 15
+
+
+class TestReplaceSectionContent:
+    """Test wholesale section-body replacement used by doc reconstruction."""
+
+    def test_deletes_existing_body_and_inserts_new_content(self, client, mock_service):
+        content = [
+            heading("Band Chronology\n", 1, 18),
+            heading("Band Members\n", 18, 32),
+            body_paragraph("Kilgore, Kero.\n", 32, 47),
+            heading("Supporting Characters\n", 47, 70),
+        ]
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
+
+        client.replace_section_content("Band Members", "New complete body")
+
+        batch_call = mock_service.documents().batchUpdate.call_args
+        requests = batch_call.kwargs["body"]["requests"]
+        assert requests[0]["deleteContentRange"]["range"] == {
+            "startIndex": 32,
+            "endIndex": 47,
+        }
+        assert requests[1]["insertText"]["location"]["index"] == 32
+        assert "New complete body" in requests[1]["insertText"]["text"]
+
+    def test_replaces_last_section_up_to_end_of_document(self, client, mock_service):
+        content = [
+            heading("Band Chronology\n", 1, 18),
+            heading("Band Members\n", 18, 32),
+            body_paragraph("Kilgore, Kero.\n", 32, 47),
+        ]
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
+
+        client.replace_section_content("Band Members", "New complete body")
+
+        batch_call = mock_service.documents().batchUpdate.call_args
+        requests = batch_call.kwargs["body"]["requests"]
+        assert requests[0]["deleteContentRange"]["range"] == {
+            "startIndex": 32,
+            "endIndex": 46,  # content[-1]['endIndex'] - 1
+        }
+
+    def test_skips_delete_when_section_body_is_already_empty(
+        self, client, mock_service
+    ):
+        content = [
+            heading("Band Members\n", 1, 15),
+            heading("Supporting Characters\n", 15, 38),
+        ]
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
+
+        client.replace_section_content("Band Members", "First content ever")
+
+        batch_call = mock_service.documents().batchUpdate.call_args
+        requests = batch_call.kwargs["body"]["requests"]
+        assert len(requests) == 1
+        assert "insertText" in requests[0]
+        assert requests[0]["insertText"]["location"]["index"] == 15
+
+    def test_raises_when_section_not_found(self, client, mock_service):
+        content = [heading("Band Chronology\n", 1, 18)]
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
+
+        with pytest.raises(ValueError, match="Nonexistent Section"):
+            client.replace_section_content("Nonexistent Section", "New content")
+
+        assert not mock_service.documents().batchUpdate.called
+
+    def test_matches_section_case_insensitively(self, client, mock_service):
+        content = [
+            heading("Band Members\n", 1, 15),
+            body_paragraph("Old content.\n", 15, 29),
+            heading("Supporting Characters\n", 29, 52),
+        ]
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
+
+        client.replace_section_content("  band members  ", "New content")
+
+        batch_call = mock_service.documents().batchUpdate.call_args
+        requests = batch_call.kwargs["body"]["requests"]
+        assert requests[0]["deleteContentRange"]["range"] == {
+            "startIndex": 15,
+            "endIndex": 29,
+        }

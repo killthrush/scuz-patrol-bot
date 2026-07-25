@@ -593,6 +593,10 @@ def _handle_test_worker(event: Dict[str, Any]) -> Dict[str, Any]:
         pct = round(score * 100)
         note = f" ({missing} required fact(s) not found in store)" if missing else ""
         lines.append(f"**{query['query_id']}** — {pct}%{note}")
+        logger.info(
+            f"Calibration '{query['query_id']}' ({pct}%) answer: {answer}\n"
+            f"Grading: {json.dumps(grading['results'])}"
+        )
 
     overall = (
         round((sum(query_scores) / len(query_scores)) * 100) if query_scores else 0

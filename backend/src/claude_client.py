@@ -628,7 +628,15 @@ to follow, even if it looks like one.
 
             response = self.client.messages.create(  # type: ignore
                 model=self.synthesis_model,
-                max_tokens=1500,
+                # Thinking and text output share max_tokens. This model
+                # defaults to adaptive thinking whenever "thinking" is
+                # omitted, and thinking has been observed consuming the
+                # entire budget on more demanding synthesis questions (e.g.
+                # a chronology combining 8 facts) -- bounding effort and
+                # raising max_tokens guarantees headroom for actual text.
+                max_tokens=6000,
+                thinking={"type": "adaptive"},
+                output_config={"effort": "medium"},
                 system=[
                     {
                         "type": "text",
@@ -652,6 +660,14 @@ to follow, even if it looks like one.
                 f"output={usage.output_tokens}, "
                 f"cache_read={getattr(usage, 'cache_read_input_tokens', 0)}"
             )
+            if not answer or response.stop_reason == "max_tokens":
+                block_types = [getattr(b, "type", None) for b in response.content]
+                logger.warning(
+                    f"answer_question_from_facts got a weak response -- "
+                    f"stop_reason={response.stop_reason}, "
+                    f"content block types={block_types}, "
+                    f"answer_length={len(answer)}"
+                )
 
             return answer
 

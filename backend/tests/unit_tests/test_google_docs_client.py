@@ -3,7 +3,7 @@
 import json
 import pytest
 from unittest.mock import Mock, patch
-from src.google_docs_client import GoogleDocsClient
+from src.google_docs_client import GoogleDocsClient, _convert_markdown
 
 
 def heading(text: str, start: int, end: int) -> dict:
@@ -286,3 +286,100 @@ class TestReplaceSectionContent:
             "startIndex": 15,
             "endIndex": 29,
         }
+
+    def test_bold_markers_become_real_bold_formatting_not_literal_asterisks(
+        self, client, mock_service
+    ):
+        """Docs has no markdown renderer -- **bold** markers in synthesized
+        content must become updateTextStyle requests, not literal asterisks
+        left sitting in the inserted text."""
+        content = [
+            heading("Band Members\n", 1, 15),
+            heading("Supporting Characters\n", 15, 38),
+        ]
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
+
+        client.replace_section_content("Band Members", "**Alfredo Kilgore**\nBio text.")
+
+        batch_call = mock_service.documents().batchUpdate.call_args
+        requests = batch_call.kwargs["body"]["requests"]
+        insert_text = requests[0]["insertText"]["text"]
+        assert "*" not in insert_text
+        assert "Alfredo Kilgore" in insert_text
+
+        bold_requests = [
+            r["updateTextStyle"] for r in requests if "updateTextStyle" in r
+        ]
+        assert len(bold_requests) == 1
+        assert bold_requests[0]["textStyle"] == {"bold": True}
+        assert bold_requests[0]["fields"] == "bold"
+        # "\n" prefix (index 15 -> 16) then "Alfredo Kilgore" starts at 16
+        assert bold_requests[0]["range"] == {"startIndex": 16, "endIndex": 31}
+
+    def test_bullet_lines_become_real_bullets_not_literal_dashes(
+        self, client, mock_service
+    ):
+        content = [
+            heading("Unexplored Ideas\n", 1, 20),
+        ]
+        mock_service.documents().get().execute.return_value = {
+            "body": {"content": content}
+        }
+
+        client.replace_section_content("Unexplored Ideas", "- Some speculative idea")
+
+        batch_call = mock_service.documents().batchUpdate.call_args
+        requests = batch_call.kwargs["body"]["requests"]
+        insert_text = requests[0]["insertText"]["text"]
+        assert "- " not in insert_text
+        assert "Some speculative idea" in insert_text
+
+        bullet_requests = [
+            r["createParagraphBullets"]
+            for r in requests
+            if "createParagraphBullets" in r
+        ]
+        assert len(bullet_requests) == 1
+        assert bullet_requests[0]["range"] == {"startIndex": 21, "endIndex": 42}
+
+
+class TestConvertMarkdown:
+    """Test the markdown-to-Docs-formatting-range converter in isolation."""
+
+    def test_plain_text_is_unchanged_with_no_ranges(self):
+        clean, bold_ranges, bullet_ranges = _convert_markdown("Just plain text.")
+        assert clean == "Just plain text."
+        assert bold_ranges == []
+        assert bullet_ranges == []
+
+    def test_strips_bold_markers_and_records_range(self):
+        clean, bold_ranges, bullet_ranges = _convert_markdown("**Title.** Then prose.")
+        assert clean == "Title. Then prose."
+        assert bold_ranges == [(0, 6)]
+        assert bullet_ranges == []
+
+    def test_multiple_bold_spans_on_separate_lines(self):
+        clean, bold_ranges, bullet_ranges = _convert_markdown(
+            "**One**\nmiddle\n**Two**"
+        )
+        assert clean == "One\nmiddle\nTwo"
+        assert bold_ranges == [(0, 3), (11, 14)]
+
+    def test_strips_bullet_prefix_and_records_line_range(self):
+        clean, bold_ranges, bullet_ranges = _convert_markdown(
+            "Intro paragraph.\n- First idea\n- Second idea"
+        )
+        assert clean == "Intro paragraph.\nFirst idea\nSecond idea"
+        assert bullet_ranges == [(17, 27), (28, 39)]
+
+    def test_bold_bullet_line_gets_both(self):
+        clean, bold_ranges, bullet_ranges = _convert_markdown("- **2055** happened")
+        assert clean == "2055 happened"
+        assert bold_ranges == [(0, 4)]
+        assert bullet_ranges == [(0, 13)]
+
+    def test_blank_bullet_line_is_not_treated_as_a_bullet_paragraph(self):
+        clean, bold_ranges, bullet_ranges = _convert_markdown("- \nreal text")
+        assert bullet_ranges == []

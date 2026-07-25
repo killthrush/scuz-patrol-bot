@@ -346,7 +346,12 @@ comments. You are folding a batch of atomic facts into the existing document.
 Rules, in priority order:
 1. Never lose a fact. Every fact_id given to you must appear in your fact_accounting.
 2. Merge, don't overwrite -- preserve everything already in the document that isn't
-   contradicted by a new fact.
+   contradicted by a new fact. "Merge" means genuinely rewriting the affected passage
+   into cohesive dossier prose, weaving the new fact into the existing narrative -- NOT
+   tacking the fact on as its own extra sentence or paragraph at the end. A section should
+   never read as a list of facts in the order they were submitted; if the reader can tell
+   where one fact's sentence ends and the next one's begins, rewrite it again until they
+   can't.
 3. A fact only needs to touch ONE section as its primary home. If it's also relevant
    elsewhere, add a brief cross-reference there instead of duplicating the content --
    the document already does this (e.g. "see Admiral Wart's entry").
@@ -401,9 +406,24 @@ shapes. Emit every "fact" line before any "section" line.
         try:
             logger.info(f"Synthesizing doc from {len(facts)} facts")
 
-            response = self.client.messages.create(  # type: ignore
+            # At max_tokens=48000 the SDK refuses a non-streamed call outright
+            # ("Streaming is required for operations that may take longer
+            # than 10 minutes") -- stream and collect the final message so
+            # the rest of this method still sees one complete response.
+            with self.client.messages.stream(  # type: ignore
                 model=self.synthesis_model,
-                max_tokens=32000,
+                # Thinking and text output share max_tokens. Left unbounded,
+                # thinking has been observed consuming the entire budget as
+                # the fact count grows (63 facts -> 32000/32000 tokens spent
+                # on thinking, zero text emitted). This model doesn't support
+                # thinking.type=enabled/budget_tokens (400: "not supported for
+                # this model, use thinking.type.adaptive and
+                # output_config.effort") -- bounding effort is this model's
+                # equivalent guarantee that headroom is reserved for the
+                # actual JSONL output no matter how much it wants to think.
+                max_tokens=48000,
+                thinking={"type": "adaptive"},
+                output_config={"effort": "medium"},
                 system=[
                     {
                         "type": "text",
@@ -417,7 +437,8 @@ shapes. Emit every "fact" line before any "section" line.
                         "content": user_prompt,
                     }
                 ],
-            )
+            ) as stream:
+                response = stream.get_final_message()
 
             response_text = _extract_text(response)
             if response_text.startswith("```"):

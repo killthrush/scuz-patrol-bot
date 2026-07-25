@@ -4,12 +4,67 @@ import base64
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
 logger = logging.getLogger()
+
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _convert_markdown(
+    text: str,
+) -> Tuple[str, List[Tuple[int, int]], List[Tuple[int, int]]]:
+    """Strip the limited markdown the synthesis prompt asks for (**bold**
+    headers, "- " bullets) and return plain text alongside the character
+    ranges that need real Google Docs formatting instead.
+
+    Docs has no markdown renderer -- inserting the raw markers as text just
+    puts literal asterisks and dashes in the document. Returns
+    (clean_text, bold_ranges, bullet_paragraph_ranges), with every range an
+    offset pair into clean_text.
+    """
+    raw_lines = text.split("\n")
+    bullet_flags = []
+    delisted_lines = []
+    for line in raw_lines:
+        stripped = line.lstrip()
+        if stripped.startswith("- "):
+            indent = len(line) - len(stripped)
+            delisted_lines.append(line[:indent] + stripped[2:])
+            bullet_flags.append(True)
+        else:
+            delisted_lines.append(line)
+            bullet_flags.append(False)
+
+    intermediate = "\n".join(delisted_lines)
+
+    clean_parts = []
+    bold_ranges = []
+    pos = 0
+    out_len = 0
+    for match in _BOLD_RE.finditer(intermediate):
+        clean_parts.append(intermediate[pos : match.start()])
+        out_len += match.start() - pos
+        bold_text = match.group(1)
+        clean_parts.append(bold_text)
+        bold_ranges.append((out_len, out_len + len(bold_text)))
+        out_len += len(bold_text)
+        pos = match.end()
+    clean_parts.append(intermediate[pos:])
+    clean_text = "".join(clean_parts)
+
+    bullet_ranges = []
+    line_start = 0
+    for line, is_bullet in zip(clean_text.split("\n"), bullet_flags):
+        if is_bullet and line.strip():
+            bullet_ranges.append((line_start, line_start + len(line)))
+        line_start += len(line) + 1
+
+    return clean_text, bold_ranges, bullet_ranges
 
 
 class GoogleDocsClient:
@@ -156,6 +211,42 @@ class GoogleDocsClient:
         text = self._extract_text_from_element(paragraph).strip()
         return text or None
 
+    def _formatting_requests(
+        self,
+        base_index: int,
+        bold_ranges: List[Tuple[int, int]],
+        bullet_ranges: List[Tuple[int, int]],
+    ) -> List[Dict[str, Any]]:
+        """Build updateTextStyle/createParagraphBullets requests for ranges
+        already inserted at base_index, given as offsets into that text."""
+        requests: List[Dict[str, Any]] = []
+        for start, end in bold_ranges:
+            requests.append(
+                {
+                    "updateTextStyle": {
+                        "range": {
+                            "startIndex": base_index + start,
+                            "endIndex": base_index + end,
+                        },
+                        "textStyle": {"bold": True},
+                        "fields": "bold",
+                    }
+                }
+            )
+        for start, end in bullet_ranges:
+            requests.append(
+                {
+                    "createParagraphBullets": {
+                        "range": {
+                            "startIndex": base_index + start,
+                            "endIndex": base_index + end,
+                        },
+                        "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE",
+                    }
+                }
+            )
+        return requests
+
     def append_to_section(self, text: str, section: str) -> None:
         """Insert new lore text at the end of a named section.
 
@@ -206,14 +297,18 @@ class GoogleDocsClient:
             logger.info(
                 f"Inserting lore into section '{section}' at index {insert_index}"
             )
+            clean_text, bold_ranges, bullet_ranges = _convert_markdown(text)
             requests = [
                 {
                     "insertText": {
-                        "text": f"\n{text}\n",
+                        "text": f"\n{clean_text}\n",
                         "location": {"index": insert_index},
                     }
                 }
             ]
+            requests.extend(
+                self._formatting_requests(insert_index + 1, bold_ranges, bullet_ranges)
+            )
 
             self.service.documents().batchUpdate(
                 documentId=self.doc_id, body={"requests": requests}
@@ -292,6 +387,8 @@ class GoogleDocsClient:
                 raise ValueError(f"Section '{section}' not found")
             start_index, end_index = section_range
 
+            clean_text, bold_ranges, bullet_ranges = _convert_markdown(new_content)
+
             requests: List[Dict[str, Any]] = []
             if end_index > start_index:
                 requests.append(
@@ -307,10 +404,13 @@ class GoogleDocsClient:
             requests.append(
                 {
                     "insertText": {
-                        "text": f"\n{new_content}\n",
+                        "text": f"\n{clean_text}\n",
                         "location": {"index": start_index},
                     }
                 }
+            )
+            requests.extend(
+                self._formatting_requests(start_index + 1, bold_ranges, bullet_ranges)
             )
 
             self.service.documents().batchUpdate(

@@ -251,7 +251,10 @@ resource "aws_iam_role_policy" "lambda_song_queue" {
 resource "aws_lambda_function" "reconstruct" {
   function_name = "${var.function_name}-reconstruct"
   role          = aws_iam_role.lambda_role.arn
-  timeout       = var.timeout
+  # Own timeout, longer than the main bot's var.timeout -- full-context
+  # synthesis over a growing fact set has already been observed taking
+  # 235s+ and can exceed 300s, killing the run before Claude even responds.
+  timeout       = 600
   memory_size   = var.memory_size
   architectures = ["x86_64"]
   publish       = true

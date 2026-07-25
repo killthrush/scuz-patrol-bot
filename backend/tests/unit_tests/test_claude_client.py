@@ -2,7 +2,7 @@
 
 import json
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from src.claude_client import ClaudeClient, _extract_text
 
 
@@ -403,7 +403,11 @@ class TestSynthesizeDoc:
             cache_read_input_tokens=0,
         )
         mock_client = Mock()
-        mock_client.messages.create.return_value = mock_response
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__enter__.return_value.get_final_message.return_value = (
+            mock_response
+        )
+        mock_client.messages.stream.return_value = mock_stream_cm
         mock_anthropic.return_value = mock_client
 
         client = ClaudeClient(api_key="test_key")
@@ -429,13 +433,17 @@ class TestSynthesizeDoc:
             cache_read_input_tokens=0,
         )
         mock_client = Mock()
-        mock_client.messages.create.return_value = mock_response
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__enter__.return_value.get_final_message.return_value = (
+            mock_response
+        )
+        mock_client.messages.stream.return_value = mock_stream_cm
         mock_anthropic.return_value = mock_client
 
         client = ClaudeClient(api_key="test_key")
         client.synthesize_doc("current doc text", self._facts())
 
-        call_kwargs = mock_client.messages.create.call_args.kwargs
+        call_kwargs = mock_client.messages.stream.call_args.kwargs
         assert call_kwargs["model"] == client.synthesis_model
         assert call_kwargs["model"] != client.model
 
@@ -453,13 +461,17 @@ class TestSynthesizeDoc:
             cache_read_input_tokens=0,
         )
         mock_client = Mock()
-        mock_client.messages.create.return_value = mock_response
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__enter__.return_value.get_final_message.return_value = (
+            mock_response
+        )
+        mock_client.messages.stream.return_value = mock_stream_cm
         mock_anthropic.return_value = mock_client
 
         client = ClaudeClient(api_key="test_key")
         client.synthesize_doc("current doc text", self._facts())
 
-        user_text = mock_client.messages.create.call_args.kwargs["messages"][0][
+        user_text = mock_client.messages.stream.call_args.kwargs["messages"][0][
             "content"
         ]
         assert "f1" in user_text
@@ -486,13 +498,17 @@ class TestSynthesizeDoc:
             cache_read_input_tokens=0,
         )
         mock_client = Mock()
-        mock_client.messages.create.return_value = mock_response
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__enter__.return_value.get_final_message.return_value = (
+            mock_response
+        )
+        mock_client.messages.stream.return_value = mock_stream_cm
         mock_anthropic.return_value = mock_client
 
         client = ClaudeClient(api_key="test_key")
         client.synthesize_doc("current doc text", self._facts())
 
-        system_text = mock_client.messages.create.call_args.kwargs["system"][0]["text"]
+        system_text = mock_client.messages.stream.call_args.kwargs["system"][0]["text"]
         assert "Performed by" in system_text
         assert "Metrivus / alfredokilgore -> Alfredo Kilgore" in system_text
 
@@ -510,7 +526,11 @@ class TestSynthesizeDoc:
             cache_read_input_tokens=0,
         )
         mock_client = Mock()
-        mock_client.messages.create.return_value = mock_response
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__enter__.return_value.get_final_message.return_value = (
+            mock_response
+        )
+        mock_client.messages.stream.return_value = mock_stream_cm
         mock_anthropic.return_value = mock_client
 
         client = ClaudeClient(api_key="test_key")
@@ -530,7 +550,11 @@ class TestSynthesizeDoc:
             cache_read_input_tokens=0,
         )
         mock_client = Mock()
-        mock_client.messages.create.return_value = mock_response
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__enter__.return_value.get_final_message.return_value = (
+            mock_response
+        )
+        mock_client.messages.stream.return_value = mock_stream_cm
         mock_anthropic.return_value = mock_client
 
         client = ClaudeClient(api_key="test_key")
@@ -576,7 +600,11 @@ class TestSynthesizeDoc:
             cache_read_input_tokens=0,
         )
         mock_client = Mock()
-        mock_client.messages.create.return_value = mock_response
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__enter__.return_value.get_final_message.return_value = (
+            mock_response
+        )
+        mock_client.messages.stream.return_value = mock_stream_cm
         mock_anthropic.return_value = mock_client
 
         client = ClaudeClient(api_key="test_key")

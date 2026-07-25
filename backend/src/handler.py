@@ -34,6 +34,7 @@ logger = logging.getLogger()
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
+DISCORD_EMBED_DESCRIPTION_LIMIT = 4096
 
 
 def _initialize_secrets() -> None:
@@ -651,8 +652,16 @@ def _handle_ask_beta_worker(event: Dict[str, Any]) -> Dict[str, Any]:
         )
         return {"statusCode": 200}
 
-    content = f"> **{message}**\n\n{answer}"
-    _send_discord_followup(interaction_token, content)
+    # Discord caps plain message content at 2000 chars -- fact-store-direct
+    # answers routinely exceed that (a full bio easily runs past it), which
+    # made the follow-up PATCH 400 and left the "thinking..." message
+    # hanging forever with no visible error. An embed description allows up
+    # to 4096, which fits real answers instead of needing a hard truncation.
+    if len(answer) > DISCORD_EMBED_DESCRIPTION_LIMIT:
+        answer = answer[: DISCORD_EMBED_DESCRIPTION_LIMIT - 1] + "…"
+    _send_discord_followup(
+        interaction_token, f"> **{message}**", embeds=[{"description": answer}]
+    )
     return {"statusCode": 200}
 
 

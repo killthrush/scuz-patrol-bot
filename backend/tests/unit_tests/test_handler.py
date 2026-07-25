@@ -1534,9 +1534,54 @@ class TestAskBetaWorker:
         mock_clients["claude"].answer_question_from_facts.assert_called_once_with(
             "Who is Kilgore?", self._facts()
         )
-        content = mock_patch.call_args.kwargs["json"]["content"]
-        assert "Who is Kilgore?" in content
-        assert "Kilgore is the front-mutant." in content
+        sent = mock_patch.call_args.kwargs["json"]
+        assert "Who is Kilgore?" in sent["content"]
+        assert sent["embeds"][0]["description"] == "Kilgore is the front-mutant."
+
+    def test_long_answer_is_sent_as_embed_not_content(self, mock_clients):
+        """Discord caps plain content at 2000 chars; a full answer must go in
+        the embed description (4096 cap), not get crammed into content."""
+        long_answer = "x" * 3000
+        mock_clients["claude"].answer_question_from_facts.return_value = long_answer
+
+        with patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=self._facts(),
+        ), patch("src.handler.requests.patch") as mock_patch:
+            response = lambda_handler(
+                {
+                    "source": "discord_ask_beta_worker",
+                    "message": "Who is Kilgore?",
+                    "interaction_token": "tok",
+                },
+                None,
+            )
+
+        assert response["statusCode"] == 200
+        sent = mock_patch.call_args.kwargs["json"]
+        assert len(sent["content"]) < 2000
+        assert sent["embeds"][0]["description"] == long_answer
+
+    def test_answer_longer_than_embed_limit_is_truncated(self, mock_clients):
+        mock_clients["claude"].answer_question_from_facts.return_value = "x" * 5000
+
+        with patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=self._facts(),
+        ), patch("src.handler.requests.patch") as mock_patch:
+            response = lambda_handler(
+                {
+                    "source": "discord_ask_beta_worker",
+                    "message": "Who is Kilgore?",
+                    "interaction_token": "tok",
+                },
+                None,
+            )
+
+        assert response["statusCode"] == 200
+        description = mock_patch.call_args.kwargs["json"]["embeds"][0]["description"]
+        assert len(description) == 4096
+        assert description.endswith("…")
 
     def test_fact_load_failure_sends_error_message(self, mock_clients):
         with patch(

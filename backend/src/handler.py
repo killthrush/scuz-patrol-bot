@@ -609,6 +609,53 @@ def _handle_test_worker(event: Dict[str, Any]) -> Dict[str, Any]:
     return {"statusCode": 200}
 
 
+def _defer_and_process_ask_beta(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
+    """Acknowledge /ask-beta immediately, answer from the fact store asynchronously."""
+    _self_invoke_async(
+        "discord_ask_beta_worker",
+        {
+            "message": parsed_event.get("message"),
+            "interaction_token": parsed_event.get("interaction_token"),
+        },
+    )
+
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"type": 5}),  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    }
+
+
+def _handle_ask_beta_worker(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Answer a question directly from the fact store instead of the canon doc.
+
+    Lives alongside /ask (unchanged) so the fact-store-direct answering path
+    can be tried against real questions, not just the fixed calibration set
+    in /test.
+    """
+    message: Optional[str] = event.get("message")
+    interaction_token: Optional[str] = event.get("interaction_token")
+
+    if not message or not interaction_token:
+        logger.error("Ask-beta worker invoked without message or interaction_token")
+        return {"statusCode": 400}
+
+    try:
+        all_facts = fact_store.get_lore_facts_for_reconstruction()
+        claude = ClaudeClient()
+        answer = claude.answer_question_from_facts(message, all_facts)
+    except Exception as e:
+        logger.error(f"Failed to answer /ask-beta question: {e}")
+        _send_discord_followup(
+            interaction_token, "⚠️ Failed to generate an answer. Please try again."
+        )
+        return {"statusCode": 200}
+
+    content = f"> **{message}**\n\n{answer}"
+    _send_discord_followup(interaction_token, content)
+    return {"statusCode": 200}
+
+
 def _put_candidate_fact(candidate: Dict[str, Any], section: str) -> None:
     try:
         fact_store.put_fact(
@@ -838,6 +885,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if event.get("source") == "discord_test_worker":
         return _handle_test_worker(event)
 
+    if event.get("source") == "discord_ask_beta_worker":
+        return _handle_ask_beta_worker(event)
+
     try:
         logger.info(f"Received event: {json.dumps(event)}")
 
@@ -872,6 +922,21 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         if parsed_event.get("command_name") == "test":
             return _defer_and_process_test(parsed_event)
+
+        # /ask-beta answers directly from the fact store instead of the
+        # canon doc -- route it separately so it doesn't fall into the
+        # classify-then-act pipeline /ask and /lore share below.
+        if parsed_event.get("command_name") == "ask-beta":
+            message = extract_message_from_event(parsed_event)
+            if not message:
+                logger.warning("No message extracted from event")
+                return {
+                    "statusCode": 400,
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps({"error": "No message found"}),
+                }
+            parsed_event["message"] = message
+            return _defer_and_process_ask_beta(parsed_event)
 
         # Extract the user's message
         message = extract_message_from_event(parsed_event)

@@ -55,6 +55,19 @@ COMMANDS = [
         ],
     },
     {
+        "name": "ask-beta",
+        "type": 1,
+        "description": "Ask a question, answered directly from the fact store (experimental)",
+        "options": [
+            {
+                "name": "question",
+                "description": "Your question about the band or lore",
+                "type": 3,
+                "required": True,
+            }
+        ],
+    },
+    {
         "name": "refresh-songs",
         "type": 1,
         "description": "Check Suno for new songs and lore dropped by the band's accounts",

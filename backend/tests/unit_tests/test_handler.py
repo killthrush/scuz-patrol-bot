@@ -1449,6 +1449,148 @@ class TestCalibrationTestWorker:
         assert response["statusCode"] == 400
 
 
+def ask_beta_command_event(question: str = "Who is Alfredo Kilgore?") -> dict:
+    """Build a Discord APPLICATION_COMMAND event for /ask-beta."""
+    return {
+        "headers": {},
+        "body": json.dumps(
+            {
+                "type": 2,
+                "token": "interaction_token_abc",
+                "data": {
+                    "name": "ask-beta",
+                    "options": [{"type": 3, "name": "question", "value": question}],
+                },
+            }
+        ),
+    }
+
+
+class TestAskBetaDeferred:
+    """/ask-beta answers from the fact store, so it needs its own dispatch path
+    distinct from /ask's classify-then-act pipeline."""
+
+    def test_defers_and_invokes_worker(self, mock_clients, monkeypatch):
+        monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "scuz-patrol-bot-dev")
+        event = ask_beta_command_event("Who is Alfredo Kilgore?")
+
+        with patch("src.handler.boto3.client") as mock_boto_client:
+            mock_lambda_client = Mock()
+            mock_boto_client.return_value = mock_lambda_client
+            response = lambda_handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["type"] == 5  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+
+        payload = json.loads(mock_lambda_client.invoke.call_args.kwargs["Payload"])
+        assert payload["source"] == "discord_ask_beta_worker"
+        assert payload["message"] == "Who is Alfredo Kilgore?"
+        assert payload["interaction_token"] == "interaction_token_abc"
+
+    def test_missing_question_returns_400(self, mock_clients):
+        event = {
+            "headers": {},
+            "body": json.dumps(
+                {"type": 2, "token": "tok", "data": {"name": "ask-beta", "options": []}}
+            ),
+        }
+        response = lambda_handler(event, None)
+        assert response["statusCode"] == 400
+
+
+class TestAskBetaWorker:
+    """Test the async worker backing /ask-beta."""
+
+    def _facts(self):
+        return [
+            {
+                "fact_id": "f1",
+                "content": "Kilgore is a front-mutant",
+                "handle": "scuz_patrol",
+                "section_hint": "Band Members",
+            }
+        ]
+
+    def test_answers_from_facts_and_reports(self, mock_clients):
+        mock_clients[
+            "claude"
+        ].answer_question_from_facts.return_value = "Kilgore is the front-mutant."
+
+        with patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=self._facts(),
+        ), patch("src.handler.requests.patch") as mock_patch:
+            response = lambda_handler(
+                {
+                    "source": "discord_ask_beta_worker",
+                    "message": "Who is Kilgore?",
+                    "interaction_token": "tok",
+                },
+                None,
+            )
+
+        assert response["statusCode"] == 200
+        mock_clients["claude"].answer_question_from_facts.assert_called_once_with(
+            "Who is Kilgore?", self._facts()
+        )
+        content = mock_patch.call_args.kwargs["json"]["content"]
+        assert "Who is Kilgore?" in content
+        assert "Kilgore is the front-mutant." in content
+
+    def test_fact_load_failure_sends_error_message(self, mock_clients):
+        with patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            side_effect=Exception("DynamoDB down"),
+        ), patch("src.handler.requests.patch") as mock_patch:
+            response = lambda_handler(
+                {
+                    "source": "discord_ask_beta_worker",
+                    "message": "Who is Kilgore?",
+                    "interaction_token": "tok",
+                },
+                None,
+            )
+
+        assert response["statusCode"] == 200
+        content = mock_patch.call_args.kwargs["json"]["content"]
+        assert "Failed to generate an answer" in content
+
+    def test_answer_failure_sends_error_message(self, mock_clients):
+        mock_clients["claude"].answer_question_from_facts.side_effect = Exception(
+            "Claude API down"
+        )
+
+        with patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=self._facts(),
+        ), patch("src.handler.requests.patch") as mock_patch:
+            response = lambda_handler(
+                {
+                    "source": "discord_ask_beta_worker",
+                    "message": "Who is Kilgore?",
+                    "interaction_token": "tok",
+                },
+                None,
+            )
+
+        assert response["statusCode"] == 200
+        content = mock_patch.call_args.kwargs["json"]["content"]
+        assert "Failed to generate an answer" in content
+
+    def test_missing_interaction_token_returns_400(self, mock_clients):
+        response = lambda_handler(
+            {"source": "discord_ask_beta_worker", "message": "Who is Kilgore?"}, None
+        )
+        assert response["statusCode"] == 400
+
+    def test_missing_message_returns_400(self, mock_clients):
+        response = lambda_handler(
+            {"source": "discord_ask_beta_worker", "interaction_token": "tok"}, None
+        )
+        assert response["statusCode"] == 400
+
+
 class TestHandlerErrorHandling:
     """Test error handling."""
 

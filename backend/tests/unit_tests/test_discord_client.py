@@ -63,6 +63,30 @@ class TestParseDiscordEvent:
         assert parsed["user_id"] == "user_789"
         assert parsed["user_name"] == "alice"
 
+    def test_command_event_in_dm_falls_back_to_top_level_user(self):
+        """DM interactions carry the user at the top level, not under
+        "member" -- Discord only nests it in "member" for guild interactions.
+        Missing this fallback means every DM-invoked command's user_name
+        comes back None and downstream code records "Unknown"."""
+        event = {
+            "headers": {},
+            "body": json.dumps(
+                {
+                    "type": 2,
+                    "id": "int_1",
+                    "token": "tok_1",
+                    "guild_id": None,
+                    "channel_id": "dm_channel_1",
+                    "user": {"id": "user_222", "username": "dm_user"},
+                    "data": {"name": "lore", "options": []},
+                }
+            ),
+        }
+        parsed = parse_discord_event(event)
+
+        assert parsed["user_id"] == "user_222"
+        assert parsed["user_name"] == "dm_user"
+
     def test_parses_component_event(self):
         """MESSAGE_COMPONENT (type=3, button click) should return component type."""
         event = {
@@ -96,6 +120,24 @@ class TestParseDiscordEvent:
         assert parsed["custom_id"] == "lore_confirm"
         assert parsed["interaction_token"] == "token_xyz"
         assert parsed["message_embeds"][0]["fields"][0]["value"] == "Band Members"
+
+    def test_component_event_in_dm_falls_back_to_top_level_user(self):
+        event = {
+            "headers": {},
+            "body": json.dumps(
+                {
+                    "type": 3,
+                    "id": "int_1",
+                    "token": "tok_1",
+                    "user": {"id": "user_333", "username": "dm_clicker"},
+                    "data": {"custom_id": "lore_confirm"},
+                }
+            ),
+        }
+        parsed = parse_discord_event(event)
+
+        assert parsed["user_id"] == "user_333"
+        assert parsed["user_name"] == "dm_clicker"
 
     def test_component_event_defaults_missing_message(self):
         """Component events without a message body shouldn't crash."""

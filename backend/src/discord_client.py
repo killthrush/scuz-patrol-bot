@@ -57,6 +57,23 @@ def verify_discord_signature(
         return False
 
 
+def _extract_user(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Get the invoking user, whether the interaction happened in a guild
+    or a DM.
+
+    Discord's payload shape differs by context: guild interactions carry
+    the user nested under "member" ("member": {"user": {...}}), while DM
+    interactions put it directly at the top level ("user": {...}), with no
+    "member" key at all. Checking only "member.user" silently returns an
+    empty dict for every DM-based command -- user_id/user_name then come
+    back None, and callers fall back to "Unknown" for who submitted it.
+    """
+    member = payload.get("member")
+    if member:
+        return member.get("user", {})
+    return payload.get("user", {})
+
+
 def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
     """Parse Discord webhook event from API Gateway.
 
@@ -114,7 +131,7 @@ def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
     # Handle APPLICATION_COMMAND events (slash commands)
     if payload.get("type") == 2:  # APPLICATION_COMMAND
         interaction = payload.get("data", {})
-        user = payload.get("member", {}).get("user", {})
+        user = _extract_user(payload)
 
         return {
             "type": "command",
@@ -131,7 +148,7 @@ def parse_discord_event(event: Dict[str, Any]) -> Dict[str, Any]:
     # Handle MESSAGE_COMPONENT events (button clicks)
     if payload.get("type") == 3:  # MESSAGE_COMPONENT
         interaction = payload.get("data", {})
-        user = payload.get("member", {}).get("user", {})
+        user = _extract_user(payload)
         message = payload.get("message", {})
 
         return {

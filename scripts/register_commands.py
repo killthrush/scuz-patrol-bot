@@ -59,6 +59,11 @@ COMMANDS = [
         "type": 1,
         "description": "Check Suno for new songs and lore dropped by the band's accounts",
     },
+    {
+        "name": "test",
+        "type": 1,
+        "description": "Run calibration queries against the fact store and report a coverage score",
+    },
 ]
 
 

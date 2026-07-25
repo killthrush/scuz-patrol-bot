@@ -635,6 +635,94 @@ class TestSongRefreshWorker:
         assert "2 profile" in summary
         assert "queued 3 song" in summary
 
+    def test_enqueues_songs_from_playlists_too(self, mock_clients):
+        """A playlist can include songs posted under a different account
+        than the one that curated it (features/collabs) -- these need to be
+        discovered even though they'd never show up in PROFILE_HANDLES' own
+        clips lists."""
+        profiles = {
+            "scuz_patrol": {
+                "clips": [{"id": "clip1", "title": "Incarcerator"}],
+                "playlists": [{"id": "playlist1", "name": "B-Sides", "song_count": 2}],
+            },
+        }
+        playlist = {
+            "name": "B-Sides",
+            "playlist_clips": [
+                {
+                    "clip": {
+                        "id": "clip2",
+                        "handle": "metrivus",
+                        "title": "Fiend Like Me",
+                    }
+                },
+                {
+                    "clip": {
+                        "id": "clip3",
+                        "handle": "lubonit84",
+                        "title": "Still Here?",
+                    }
+                },
+            ],
+        }
+
+        with patch(
+            "src.handler.suno_client.fetch_profiles_parallel", return_value=profiles
+        ), patch(
+            "src.handler.suno_client.fetch_playlist", return_value=playlist
+        ), patch(
+            "src.handler.suno_client.enqueue_song"
+        ) as mock_enqueue, patch(
+            "src.handler.requests.patch"
+        ) as mock_patch:
+            response = lambda_handler(
+                {"source": "discord_song_refresh_worker", "interaction_token": "tok"},
+                None,
+            )
+
+        assert response["statusCode"] == 200
+        assert mock_enqueue.call_count == 3
+        mock_enqueue.assert_any_call("clip1", "scuz_patrol", "Incarcerator")
+        mock_enqueue.assert_any_call("clip2", "metrivus", "Fiend Like Me")
+        mock_enqueue.assert_any_call("clip3", "lubonit84", "Still Here?")
+        summary = mock_patch.call_args.kwargs["json"]["content"]
+        assert "queued 3 song" in summary
+
+    def test_playlist_fetch_failure_does_not_block_other_playlists(self, mock_clients):
+        profiles = {
+            "scuz_patrol": {
+                "clips": [],
+                "playlists": [
+                    {"id": "bad_playlist", "name": "Broken"},
+                    {"id": "good_playlist", "name": "OK"},
+                ],
+            },
+        }
+        good_playlist = {
+            "name": "OK",
+            "playlist_clips": [{"clip": {"id": "clip9", "handle": "metrivus"}}],
+        }
+
+        with patch(
+            "src.handler.suno_client.fetch_profiles_parallel", return_value=profiles
+        ), patch(
+            "src.handler.suno_client.fetch_playlist",
+            side_effect=[Exception("Suno API down"), good_playlist],
+        ), patch(
+            "src.handler.suno_client.enqueue_song"
+        ) as mock_enqueue, patch(
+            "src.handler.requests.patch"
+        ) as mock_patch:
+            response = lambda_handler(
+                {"source": "discord_song_refresh_worker", "interaction_token": "tok"},
+                None,
+            )
+
+        assert response["statusCode"] == 200
+        mock_enqueue.assert_called_once_with("clip9", "metrivus", None)
+        summary = mock_patch.call_args.kwargs["json"]["content"]
+        assert "queued 1 song" in summary
+
     def test_one_enqueue_failure_does_not_block_others(self, mock_clients):
         profiles = {
             "scuz_patrol": {
@@ -859,7 +947,7 @@ class TestSongQueueWorker:
         assert by_source["suno_caption"]["category"] == "lore"
         assert by_source["suno_caption_credit"]["category"] == "credit"
         assert by_source["suno_caption_credit"]["section_hint"] == "Credits"
-        assert by_source["suno_caption_credit"]["classification"] is None
+        assert "classification" not in by_source["suno_caption_credit"]
 
     def test_gated_reply_from_real_person_respects_classification(self, mock_clients):
         """metrivus/killthrush/lubonit84 aren't always in-character, so their
@@ -932,7 +1020,7 @@ class TestSongQueueWorker:
         assert by_source["suno_lyrics_text"]["category"] == "lyrics"
         assert by_source["suno_lyrics_text"]["content"] == "actual lyrics here"
         assert by_source["suno_lyrics_text"]["section_hint"] == "Lyrics Archive"
-        assert by_source["suno_lyrics_text"]["classification"] is None
+        assert "classification" not in by_source["suno_lyrics_text"]
         # Only the backstory candidate needs a section suggestion -- lyrics
         # never do, and neither ever calls classify_intent (no lore gate for
         # always_canon content).
@@ -1188,6 +1276,177 @@ class TestReconstructHandler:
         assert response["statusCode"] == 200
         assert not mock_mark_integrated.called
         assert not mock_clients["claude"].synthesize_doc.called
+
+
+def calibration_command_event() -> dict:
+    """Build a Discord APPLICATION_COMMAND event for /test (no options)."""
+    return {
+        "headers": {},
+        "body": json.dumps(
+            {
+                "type": 2,
+                "token": "interaction_token_abc",
+                "data": {"name": "test", "options": []},
+            }
+        ),
+    }
+
+
+class TestCalibrationTestDeferred:
+    """/test takes no text option, so it needs its own dispatch path."""
+
+    def test_defers_and_invokes_worker(self, mock_clients, monkeypatch):
+        monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "scuz-patrol-bot-dev")
+        event = calibration_command_event()
+
+        with patch("src.handler.boto3.client") as mock_boto_client:
+            mock_lambda_client = Mock()
+            mock_boto_client.return_value = mock_lambda_client
+            response = lambda_handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["type"] == 5  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+
+        payload = json.loads(mock_lambda_client.invoke.call_args.kwargs["Payload"])
+        assert payload["source"] == "discord_test_worker"
+        assert payload["interaction_token"] == "interaction_token_abc"
+
+
+class TestCalibrationTestWorker:
+    """Test the async worker that runs calibration queries and grades them."""
+
+    FAKE_QUERIES = [
+        {
+            "query_id": "q1",
+            "category": "member_bio",
+            "question": "Who is Kilgore?",
+            "required_fact_ids": ["f1", "f2"],
+            "speculative": False,
+        },
+        {
+            "query_id": "q2",
+            "category": "chronology",
+            "question": "What happened in 2055?",
+            "required_fact_ids": ["f3"],
+            "speculative": False,
+        },
+    ]
+
+    def _facts(self):
+        return [
+            {
+                "fact_id": "f1",
+                "content": "Kilgore joined the band",
+                "handle": "scuz_patrol",
+                "section_hint": "Band Members",
+            },
+            {
+                "fact_id": "f2",
+                "content": "Kilgore is a front-mutant",
+                "handle": "scuz_patrol",
+                "section_hint": "Band Members",
+            },
+            {
+                "fact_id": "f3",
+                "content": "Mars was colonized in 2055",
+                "handle": "scuz_patrol",
+                "section_hint": "Band Chronology",
+            },
+        ]
+
+    def test_computes_overall_score_and_reports_summary(self, mock_clients):
+        mock_clients["claude"].answer_question_from_facts.return_value = "An answer."
+        mock_clients["claude"].grade_answer_coverage.side_effect = [
+            {"score": 1.0, "results": []},
+            {"score": 0.0, "results": []},
+        ]
+
+        with patch("src.handler.CALIBRATION_QUERIES", self.FAKE_QUERIES), patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=self._facts(),
+        ), patch("src.handler.requests.patch") as mock_patch:
+            response = lambda_handler(
+                {"source": "discord_test_worker", "interaction_token": "tok"}, None
+            )
+
+        assert response["statusCode"] == 200
+        summary = mock_patch.call_args.kwargs["json"]["content"]
+        assert "q1" in summary and "100%" in summary
+        assert "q2" in summary and "0%" in summary
+        assert "50%" in summary  # overall = mean of 1.0 and 0.0
+
+    def test_missing_required_fact_is_noted_but_does_not_crash(self, mock_clients):
+        queries = [
+            {
+                "query_id": "q_missing",
+                "category": "member_bio",
+                "question": "Who is Kilgore?",
+                "required_fact_ids": ["f1", "does-not-exist"],
+                "speculative": False,
+            }
+        ]
+        mock_clients["claude"].answer_question_from_facts.return_value = "An answer."
+        mock_clients["claude"].grade_answer_coverage.return_value = {
+            "score": 1.0,
+            "results": [],
+        }
+
+        with patch("src.handler.CALIBRATION_QUERIES", queries), patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=self._facts(),
+        ), patch("src.handler.requests.patch") as mock_patch:
+            response = lambda_handler(
+                {"source": "discord_test_worker", "interaction_token": "tok"}, None
+            )
+
+        assert response["statusCode"] == 200
+        # grade_answer_coverage should only get the fact that actually exists
+        graded_facts = mock_clients["claude"].grade_answer_coverage.call_args.args[2]
+        assert len(graded_facts) == 1
+        assert graded_facts[0]["fact_id"] == "f1"
+        summary = mock_patch.call_args.kwargs["json"]["content"]
+        assert "not found in store" in summary
+
+    def test_fact_load_failure_sends_error_message(self, mock_clients):
+        with patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            side_effect=Exception("DynamoDB down"),
+        ), patch("src.handler.requests.patch") as mock_patch:
+            response = lambda_handler(
+                {"source": "discord_test_worker", "interaction_token": "tok"}, None
+            )
+
+        assert response["statusCode"] == 200
+        content = mock_patch.call_args.kwargs["json"]["content"]
+        assert "Failed to load facts" in content
+
+    def test_one_query_failure_does_not_block_others(self, mock_clients):
+        mock_clients["claude"].answer_question_from_facts.side_effect = [
+            Exception("Claude API down"),
+            "An answer.",
+        ]
+        mock_clients["claude"].grade_answer_coverage.return_value = {
+            "score": 1.0,
+            "results": [],
+        }
+
+        with patch("src.handler.CALIBRATION_QUERIES", self.FAKE_QUERIES), patch(
+            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            return_value=self._facts(),
+        ), patch("src.handler.requests.patch") as mock_patch:
+            response = lambda_handler(
+                {"source": "discord_test_worker", "interaction_token": "tok"}, None
+            )
+
+        assert response["statusCode"] == 200
+        summary = mock_patch.call_args.kwargs["json"]["content"]
+        assert "q1" in summary and "failed" in summary
+        assert "q2" in summary and "100%" in summary
+
+    def test_missing_interaction_token_returns_400(self, mock_clients):
+        response = lambda_handler({"source": "discord_test_worker"}, None)
+        assert response["statusCode"] == 400
 
 
 class TestHandlerErrorHandling:

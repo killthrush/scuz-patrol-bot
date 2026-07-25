@@ -26,6 +26,7 @@ since canon-voice accounts frequently hide lore there too.
 import json
 import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -98,6 +99,18 @@ def fetch_profile(handle: str) -> Dict[str, Any]:
 def fetch_clip(clip_id: str) -> Dict[str, Any]:
     """Fetch one clip's metadata (title, caption, metadata.prompt, comment_count, ...)."""
     return _get_json(f"{SUNO_API_BASE}/clip/{clip_id}")
+
+
+def fetch_playlist(playlist_id: str) -> Dict[str, Any]:
+    """Fetch one playlist's full clip list ("playlist_clips": [{"clip": {...}}]).
+
+    A profile's own "playlists" field (from fetch_profile) only carries
+    playlist metadata (id, name, song_count) -- the actual clips need this
+    separate call. Playlists can include songs posted under a different
+    account than the one that curated the playlist (features/collabs), so
+    this is a real second source of songs beyond PROFILE_HANDLES' own clips.
+    """
+    return _get_json(f"{SUNO_API_BASE}/playlist/{playlist_id}")
 
 
 def fetch_comments(clip_id: str) -> Dict[str, Any]:
@@ -213,6 +226,25 @@ def _is_trivial(text: Optional[str]) -> bool:
     return False
 
 
+_TRACK_LABEL_RE = re.compile(r"^(track|collab)\s*\d+$", re.IGNORECASE)
+
+
+def _is_credits_only_caption(caption: str) -> bool:
+    """True for a caption that's just a bracketed credits list plus a bare
+    track/collab index label, e.g. "[ Metrivus | ... ] ☢️ Track 8" -- pure
+    metadata, not lore, even though every song has one.
+
+    _is_trivial alone doesn't catch this: "Track 8" has real alphanumeric
+    content and isn't a Suno-platform mention, so it reads as substantive
+    unless the credits bracket and the bare index label are recognized and
+    stripped first. Without this, every song's caption gets recorded as its
+    own "lore" fact even when there's nothing in it but a track number.
+    """
+    remainder = re.sub(r"^\s*\[[^\]]*\]\s*", "", caption)
+    remainder = "".join(ch for ch in remainder if ch.isalnum() or ch.isspace()).strip()
+    return _is_trivial(remainder) or bool(_TRACK_LABEL_RE.match(remainder))
+
+
 def _split_lyric_box(prompt: str) -> Tuple[str, Optional[str]]:
     """Split Suno's lyric box into (backstory, lyrics) on LYRICS_DELIMITER.
 
@@ -267,17 +299,18 @@ def mine_song_facts(
 
     caption = clip.get("caption")
     if caption and caption != artifact.get("caption") and not _is_trivial(caption):
-        candidates.append(
-            {
-                "content": caption,
-                "handle": handle,
-                "source": "suno_caption",
-                "source_ref": clip_id,
-                "category": "lore",
-                "always_canon": handle in ALWAYS_CANON_HANDLES,
-                "title": title,
-            }
-        )
+        if not _is_credits_only_caption(caption):
+            candidates.append(
+                {
+                    "content": caption,
+                    "handle": handle,
+                    "source": "suno_caption",
+                    "source_ref": clip_id,
+                    "category": "lore",
+                    "always_canon": handle in ALWAYS_CANON_HANDLES,
+                    "title": title,
+                }
+            )
         caption_lower = caption.lower()
         if any(credit_handle in caption_lower for credit_handle in CREDIT_HANDLES):
             candidates.append(

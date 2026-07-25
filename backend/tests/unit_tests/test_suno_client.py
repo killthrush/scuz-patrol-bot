@@ -55,6 +55,17 @@ class TestFetchHelpers:
         called_url = mock_requests_get.call_args.args[0]
         assert "gen/clip1/comments" in called_url
 
+    def test_fetch_playlist_builds_correct_url(self, mock_requests_get):
+        mock_response = Mock()
+        mock_response.json.return_value = {"name": "B-Sides", "playlist_clips": []}
+        mock_requests_get.return_value = mock_response
+
+        result = suno_client.fetch_playlist("playlist1")
+
+        called_url = mock_requests_get.call_args.args[0]
+        assert "playlist/playlist1" in called_url
+        assert result["name"] == "B-Sides"
+
 
 class TestRateLimitRetry:
     """Suno's API rate limits us -- verify we back off and retry instead of dropping data."""
@@ -258,6 +269,36 @@ class TestIsTrivial:
         assert not suno_client._is_trivial(content)
 
 
+class TestIsCreditsOnlyCaption:
+    """Test the filter for captions that are just a credits tag + track
+    index, e.g. "[ Metrivus | ... ] ☢️ Track 8" -- these have real
+    alphanumeric content so _is_trivial alone doesn't catch them."""
+
+    def test_bare_track_label_is_credits_only(self):
+        assert suno_client._is_credits_only_caption("Track 8")
+        assert suno_client._is_credits_only_caption("Collab 1")
+        assert suno_client._is_credits_only_caption("track 12")
+
+    def test_bracketed_credits_plus_track_label_is_credits_only(self):
+        assert suno_client._is_credits_only_caption(
+            "[ Metrivus | • Synthy Pixie • | killthrush ] ☢️ Track 8"
+        )
+        assert suno_client._is_credits_only_caption(
+            "[ Metrivus | • Synthy Pixie • | killthrush | TheseStrangeColours ] "
+            "☢️ Collab 1"
+        )
+
+    def test_real_lore_caption_is_not_credits_only(self):
+        assert not suno_client._is_credits_only_caption(
+            "Recorded during a total eclipse over Ceres"
+        )
+
+    def test_bracketed_credits_with_real_content_after_is_not_credits_only(self):
+        assert not suno_client._is_credits_only_caption(
+            "[ Metrivus | killthrush ] This one's about the Deimos raid"
+        )
+
+
 class TestSplitLyricBox:
     """Test splitting Suno's lyric box into backstory + lyrics."""
 
@@ -369,14 +410,16 @@ class TestMineSongFacts:
         assert candidates == []
 
     def test_extracts_new_caption_as_candidate(self):
-        clip = self._clip(metadata={})
+        clip = self._clip(
+            caption="Recorded during a total eclipse over Ceres", metadata={}
+        )
         comments = {"results": []}
 
         candidates, updated_artifact = suno_client.mine_song_facts(clip, comments, {})
 
         assert candidates == [
             {
-                "content": "Track 8",
+                "content": "Recorded during a total eclipse over Ceres",
                 "handle": "scuz_patrol",
                 "source": "suno_caption",
                 "source_ref": "clip1",
@@ -385,12 +428,15 @@ class TestMineSongFacts:
                 "title": "Incarcerator",
             }
         ]
-        assert updated_artifact["caption"] == "Track 8"
+        assert (
+            updated_artifact["caption"] == "Recorded during a total eclipse over Ceres"
+        )
 
     def test_unchanged_caption_is_not_a_candidate(self):
-        clip = self._clip(metadata={})
+        caption = "Recorded during a total eclipse over Ceres"
+        clip = self._clip(caption=caption, metadata={})
         comments = {"results": []}
-        artifact = {"caption": "Track 8"}
+        artifact = {"caption": caption}
 
         candidates, _ = suno_client.mine_song_facts(clip, comments, artifact)
 
@@ -403,6 +449,30 @@ class TestMineSongFacts:
         candidates, _ = suno_client.mine_song_facts(clip, comments, {})
 
         assert candidates == []
+
+    def test_credits_only_caption_is_skipped_as_lore(self):
+        """The default fixture caption ("Track 8") is exactly the pattern
+        that used to get recorded as a bogus standalone "lore" fact for
+        every single song -- see _is_credits_only_caption."""
+        clip = self._clip(metadata={})
+        comments = {"results": []}
+
+        candidates, updated_artifact = suno_client.mine_song_facts(clip, comments, {})
+
+        assert candidates == []
+        # Artifact still updates so this caption isn't re-checked every pass.
+        assert updated_artifact["caption"] == "Track 8"
+
+    def test_bracketed_credits_caption_is_skipped_as_lore(self):
+        clip = self._clip(
+            caption="[ Metrivus | • Synthy Pixie • | killthrush ] ☢️ Track 8",
+            metadata={},
+        )
+        comments = {"results": []}
+
+        candidates, _ = suno_client.mine_song_facts(clip, comments, {})
+
+        assert [c["source"] for c in candidates] == ["suno_caption_credit"]
 
     def test_caption_mentioning_contributor_also_yields_credit_candidate(self):
         clip = self._clip(caption="Vocals by killthrush on this one", metadata={})
@@ -417,7 +487,9 @@ class TestMineSongFacts:
         assert credit["content"] == "Vocals by killthrush on this one"
 
     def test_caption_without_contributor_mention_has_no_credit_candidate(self):
-        clip = self._clip(caption="Track 8", metadata={})
+        clip = self._clip(
+            caption="Recorded live on the moon during a meteor shower", metadata={}
+        )
         comments = {"results": []}
 
         candidates, _ = suno_client.mine_song_facts(clip, comments, {})

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
-from src import reconstruction_trigger
+from src import reconstruction_trigger  # noqa: F401 -- call site short-circuited below
 
 logger = logging.getLogger()
 
@@ -59,7 +59,6 @@ def put_fact(
     handle: str,
     source: str,
     source_ref: str,
-    classification: Optional[str] = None,
     category: str = CATEGORY_LORE,
     title: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -73,7 +72,6 @@ def put_fact(
         source: Where it came from, e.g. "discord_lore" or "suno_reply".
         source_ref: An ID tying the fact back to its origin (Discord message/
             interaction ID, Suno reply ID) for audit/traceability.
-        classification: Raw intent classification, kept for audit.
         category: What this fact is for -- CATEGORY_LORE facts get folded
             into the canon doc on reconstruction; CATEGORY_LYRICS and
             CATEGORY_CREDIT are recorded but never appended anywhere.
@@ -97,7 +95,6 @@ def put_fact(
         "source": source,
         "source_ref": source_ref,
         "title": title or "",
-        "classification": classification or "",
         "category": category,
         "ingested_at": datetime.now(timezone.utc).isoformat(),
         "status": STATUS_PENDING,
@@ -106,10 +103,14 @@ def put_fact(
     client = boto3.client("dynamodb")
     client.put_item(TableName=_table_name(), Item=_to_item(fact))
 
-    try:
-        reconstruction_trigger.schedule_reconstruction()
-    except Exception as e:
-        logger.error(f"Failed to schedule reconstruction debounce: {e}")
+    # Short-circuited while we evaluate answering directly from the fact
+    # store (see claude_client.answer_question_from_facts / the /test
+    # command) -- the doc is intentionally not being kept current right now.
+    # Re-enable by uncommenting the call below; nothing else needs to change.
+    # try:
+    #     reconstruction_trigger.schedule_reconstruction()
+    # except Exception as e:
+    #     logger.error(f"Failed to schedule reconstruction debounce: {e}")
 
     return fact
 

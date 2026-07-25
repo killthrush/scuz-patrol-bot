@@ -25,6 +25,7 @@ from src.claude_client import ClaudeClient
 from src.google_docs_client import GoogleDocsClient
 from src import suno_client
 from src import fact_store
+from src.calibration_queries import CALIBRATION_QUERIES
 
 # Load .env for local testing (no-op in Lambda)
 load_dotenv()
@@ -439,8 +440,46 @@ def _defer_and_process_song_refresh(parsed_event: Dict[str, Any]) -> Dict[str, A
     }
 
 
+def _enqueue_playlist_clips(playlist_id: str, playlist_name: str) -> int:
+    """Fetch one playlist's full clip list and enqueue each song.
+
+    Playlists can include songs posted under a different Suno account than
+    the one that curated the playlist (features/collabs) -- e.g. a track by
+    the real person behind Kilgore, posted under their own handle, that
+    never shows up in scuz_patrol's own clips list. profile.get("playlists")
+    only carries metadata (id/name/song_count), so this is a separate fetch.
+    Songs already seen via a profile's own clips list are harmless to
+    re-enqueue -- SQS FIFO dedupes by clip_id within its window, and beyond
+    that, mine_song_facts diffs against the S3 artifact and finds nothing
+    new.
+    """
+    try:
+        playlist = suno_client.fetch_playlist(playlist_id)
+    except Exception as e:
+        logger.error(
+            f"Failed to fetch Suno playlist '{playlist_name}' ({playlist_id}): {e}"
+        )
+        return 0
+
+    queued = 0
+    for entry in playlist.get("playlist_clips", []):
+        clip = entry.get("clip", {})
+        clip_id = clip.get("id")
+        if not clip_id:
+            continue
+        try:
+            suno_client.enqueue_song(
+                clip_id, clip.get("handle", "unknown"), clip.get("title")
+            )
+            queued += 1
+        except Exception as e:
+            logger.error(f"Failed to enqueue playlist clip {clip_id}: {e}")
+    return queued
+
+
 def _handle_song_refresh_worker(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Enumerate Suno profiles and enqueue each song for background ingest.
+    """Enumerate Suno profiles (and their playlists) and enqueue each song
+    for background ingest.
 
     Deliberately does no mining/classification/doc-writing itself -- that all
     happens per-song in _process_song_queue_message, triggered by the SQS
@@ -470,6 +509,11 @@ def _handle_song_refresh_worker(event: Dict[str, Any]) -> Dict[str, Any]:
             except Exception as e:
                 logger.error(f"Failed to enqueue Suno clip {clip.get('id')}: {e}")
 
+        for playlist in profile.get("playlists", []):
+            queued += _enqueue_playlist_clips(
+                playlist.get("id"), playlist.get("name", "unknown")
+            )
+
     plural = "s" if queued != 1 else ""
     summary = (
         f"🔄 Checked {len(profiles)} profile(s), queued {queued} song{plural} "
@@ -479,11 +523,89 @@ def _handle_song_refresh_worker(event: Dict[str, Any]) -> Dict[str, Any]:
     return {"statusCode": 200}
 
 
-def _put_candidate_fact(
-    candidate: Dict[str, Any],
-    section: str,
-    classification: Optional[Dict[str, Any]] = None,
-) -> None:
+def _defer_and_process_test(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
+    """Acknowledge /test immediately, run the calibration suite asynchronously."""
+    _self_invoke_async(
+        "discord_test_worker",
+        {
+            "interaction_token": parsed_event.get("interaction_token"),
+        },
+    )
+
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"type": 5}),  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    }
+
+
+def _handle_test_worker(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Run every calibration query against answer_question_from_facts, grade
+    each answer's fact coverage, and report an aggregate score.
+
+    This exercises the fact-store-direct answering path (not the doc-based
+    /ask), specifically to catch aggregation-quality degradation -- an
+    answer that reads as plausible while quietly dropping one of several
+    facts it should have combined. See calibration_queries.py for how each
+    query is anchored to real fact_ids.
+    """
+    interaction_token: Optional[str] = event.get("interaction_token")
+    if not interaction_token:
+        logger.error("Test worker invoked without interaction_token")
+        return {"statusCode": 400}
+
+    try:
+        all_facts = fact_store.get_lore_facts_for_reconstruction()
+    except Exception as e:
+        logger.error(f"Failed to load facts for calibration run: {e}")
+        _send_discord_followup(
+            interaction_token,
+            "⚠️ Failed to load facts for calibration. Please try again.",
+        )
+        return {"statusCode": 200}
+
+    facts_by_id = {f["fact_id"]: f for f in all_facts}
+    claude = ClaudeClient()
+
+    lines = []
+    query_scores = []
+    for query in CALIBRATION_QUERIES:
+        required_facts = [
+            facts_by_id[fid] for fid in query["required_fact_ids"] if fid in facts_by_id
+        ]
+        missing = len(query["required_fact_ids"]) - len(required_facts)
+
+        try:
+            answer = claude.answer_question_from_facts(query["question"], all_facts)
+            grading = claude.grade_answer_coverage(
+                query["question"],
+                answer,
+                required_facts,
+                speculative=query.get("speculative", False),
+            )
+        except Exception as e:
+            logger.error(f"Calibration query '{query['query_id']}' failed: {e}")
+            lines.append(f"⚠️ **{query['query_id']}**: failed ({e})")
+            continue
+
+        score = grading["score"]
+        query_scores.append(score)
+        pct = round(score * 100)
+        note = f" ({missing} required fact(s) not found in store)" if missing else ""
+        lines.append(f"**{query['query_id']}** — {pct}%{note}")
+
+    overall = (
+        round((sum(query_scores) / len(query_scores)) * 100) if query_scores else 0
+    )
+    summary = (
+        f"🧪 **Calibration results** — overall fact coverage: {overall}%\n\n"
+        + "\n".join(lines)
+    )
+    _send_discord_followup(interaction_token, summary)
+    return {"statusCode": 200}
+
+
+def _put_candidate_fact(candidate: Dict[str, Any], section: str) -> None:
     try:
         fact_store.put_fact(
             content=candidate["content"],
@@ -493,7 +615,6 @@ def _put_candidate_fact(
             source_ref=candidate["source_ref"],
             category=candidate["category"],
             title=candidate.get("title"),
-            classification=json.dumps(classification) if classification else None,
         )
     except ValueError as e:
         logger.warning(f"Skipping oversized {candidate['source']} fact: {e}")
@@ -534,9 +655,7 @@ def _write_candidate(
                     f"Failed to get section suggestion for {candidate['source']} "
                     f"candidate for song {clip_id}: {e}"
                 )
-        _put_candidate_fact(
-            candidate, section, {"always_canon": True, "section": section}
-        )
+        _put_candidate_fact(candidate, section)
         return
 
     if claude is None or canon_doc is None:
@@ -553,7 +672,7 @@ def _write_candidate(
         return
 
     section = str(classification.get("suggested_section", "Unexplored Ideas"))
-    _put_candidate_fact(candidate, section, classification)
+    _put_candidate_fact(candidate, section)
 
 
 def _process_song_queue_message(message: Dict[str, Any]) -> None:
@@ -712,6 +831,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if event.get("source") == "discord_song_refresh_worker":
         return _handle_song_refresh_worker(event)
 
+    if event.get("source") == "discord_test_worker":
+        return _handle_test_worker(event)
+
     try:
         logger.info(f"Received event: {json.dumps(event)}")
 
@@ -739,10 +861,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if parsed_event.get("type") == "component":
             return _handle_component_interaction(parsed_event)
 
-        # /refresh-songs takes no text option, so it can't go through the
-        # extract_message_from_event path below
+        # /refresh-songs and /test take no text option, so they can't go
+        # through the extract_message_from_event path below
         if parsed_event.get("command_name") == "refresh-songs":
             return _defer_and_process_song_refresh(parsed_event)
+
+        if parsed_event.get("command_name") == "test":
+            return _defer_and_process_test(parsed_event)
 
         # Extract the user's message
         message = extract_message_from_event(parsed_event)

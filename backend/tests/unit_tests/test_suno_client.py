@@ -319,6 +319,31 @@ class TestSplitLyricBox:
         assert backstory == "backstory only"
         assert lyrics is None
 
+    def test_splits_on_hyphen_rule(self):
+        """Some accounts (alfredokilgore, metrivus) divide the lyric box with
+        a plain horizontal rule of hyphens instead of LYRICS_DELIMITER."""
+        prompt = (
+            "Written after the breakup\n"
+            "--------------------------------------------------------------------------\n"
+            "it follows, it follows"
+        )
+        backstory, lyrics = suno_client._split_lyric_box(prompt)
+        assert backstory == "Written after the breakup"
+        assert lyrics == "it follows, it follows"
+
+    def test_short_hyphen_run_is_not_treated_as_a_rule(self):
+        """A run of a few hyphens (e.g. a real dash in prose) shouldn't be
+        mistaken for the divider -- only a long horizontal-rule-style run does."""
+        backstory, lyrics = suno_client._split_lyric_box("well-worn backstory blurb")
+        assert backstory == "well-worn backstory blurb"
+        assert lyrics is None
+
+    def test_empty_lyrics_after_hyphen_rule_is_none(self):
+        prompt = "backstory only\n" + "-" * 20 + "\n   "
+        backstory, lyrics = suno_client._split_lyric_box(prompt)
+        assert backstory == "backstory only"
+        assert lyrics is None
+
 
 class TestMineSongFacts:
     """Test diffing one song's live clip/comments against its artifact for candidate facts."""

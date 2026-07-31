@@ -61,7 +61,7 @@ class TestPutFact:
     def test_rejects_content_over_max_length(self, mock_dynamo_client):
         too_long = "x" * (fact_store.MAX_FACT_LENGTH + 1)
 
-        with pytest.raises(ValueError, match="2000"):
+        with pytest.raises(ValueError, match=str(fact_store.MAX_FACT_LENGTH)):
             fact_store.put_fact(
                 content=too_long,
                 section_hint="Band Members",

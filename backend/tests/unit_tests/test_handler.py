@@ -138,7 +138,8 @@ class TestAsyncWorkerProcessing:
         assert "Here's the answer" in sent_content
 
     def test_new_lore_intent(self, mock_clients):
-        """Should send a Confirm/Discard prompt with lore text as content, section/submitter as embed fields."""
+        """Should send a Confirm/Discard prompt with lore text in the embed
+        description, section/submitter as embed fields."""
         mock_clients["claude"].classify_intent.return_value = {
             "intent": "new_lore",
             "confidence": 0.88,
@@ -151,7 +152,8 @@ class TestAsyncWorkerProcessing:
 
         assert response["statusCode"] == 200
         sent_json = mock_patch.call_args.kwargs["json"]
-        assert sent_json["content"] == "Who is Alfredo?"
+        assert sent_json["content"] == ""
+        assert sent_json["embeds"][0]["description"] == "Who is Alfredo?"
         fields = {f["name"]: f["value"] for f in sent_json["embeds"][0]["fields"]}
         assert fields["Section"] == "Band Members"
         assert fields["Submitted by"] == "killthrush"
@@ -163,22 +165,25 @@ class TestAsyncWorkerProcessing:
         assert custom_ids == {"lore_confirm", "lore_discard"}
 
     def test_new_lore_intent_over_length_cap_is_rejected(self, mock_clients):
-        """A lore submission over MAX_FACT_LENGTH should get an error, not a confirm prompt."""
-        from src.fact_store import MAX_FACT_LENGTH
+        """A lore submission over the Discord embed limit should get an
+        error, not a confirm prompt -- this is bounded by
+        DISCORD_EMBED_DESCRIPTION_LIMIT, not fact_store.MAX_FACT_LENGTH,
+        since the confirmation prompt has to fit in one Discord embed."""
+        from src.handler import DISCORD_EMBED_DESCRIPTION_LIMIT
 
         mock_clients["claude"].classify_intent.return_value = {
             "intent": "new_lore",
             "suggested_section": "Band Members",
         }
         mock_clients["docs"].read_document.return_value = "Canon doc content"
-        too_long = "x" * (MAX_FACT_LENGTH + 1)
+        too_long = "x" * (DISCORD_EMBED_DESCRIPTION_LIMIT + 1)
 
         with patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(self.async_event(message=too_long), None)
 
         assert response["statusCode"] == 200
         sent_json = mock_patch.call_args.kwargs["json"]
-        assert str(MAX_FACT_LENGTH) in sent_json["content"]
+        assert str(DISCORD_EMBED_DESCRIPTION_LIMIT) in sent_json["content"]
         assert sent_json.get("components") is None
         assert sent_json.get("embeds") is None
 
@@ -303,18 +308,23 @@ def component_event(custom_id: str, content: str = "", embeds: list = None) -> d
     }
 
 
-def lore_embed(section: str = "Band Members", submitted_by: str = "killthrush") -> list:
+def lore_embed(
+    text: str = "Kilgore joined in 2020",
+    section: str = "Band Members",
+    submitted_by: str = "killthrush",
+) -> list:
     """Build the embed structure a pending lore confirmation message carries.
 
-    The lore text itself isn't here -- it lives in the message content (see
-    component_event), since it can run past Discord's 1024-char embed field cap.
+    The lore text lives in the embed description (see
+    _build_lore_confirmation_message), not the message content.
     """
     return [
         {
+            "description": text,
             "fields": [
                 {"name": "Section", "value": section},
                 {"name": "Submitted by", "value": submitted_by},
-            ]
+            ],
         }
     ]
 
@@ -325,18 +335,21 @@ class TestComponentInteraction:
     def test_discard_updates_message_immediately(self, mock_clients):
         """Discard should synchronously update the message, no async work needed.
 
-        The original lore text stays visible (in content) so people scrolling
-        back can see what was discarded, instead of a bare status line.
+        The original lore text stays visible (in the embed description) so
+        people scrolling back can see what was discarded, instead of a bare
+        status line.
         """
-        event = component_event("lore_discard", "Kilgore joined in 2020", lore_embed())
+        event = component_event(
+            "lore_discard", embeds=lore_embed("Kilgore joined in 2020")
+        )
         response = lambda_handler(event, None)
 
         assert response["statusCode"] == 200
         body = json.loads(response["body"])
         assert body["type"] == 7  # UPDATE_MESSAGE
         assert body["data"]["components"] == []
-        assert body["data"]["content"] == "Kilgore joined in 2020"
-        assert body["data"]["embeds"][0]["description"] == "❌ Discarded."
+        assert body["data"]["embeds"][0]["description"] == "Kilgore joined in 2020"
+        assert "❌ Discarded." in body["data"]["embeds"][0]["title"]
         fields = {f["name"]: f["value"] for f in body["data"]["embeds"][0]["fields"]}
         assert fields["Section"] == "Band Members"
         assert fields["Submitted by"] == "killthrush"
@@ -357,7 +370,9 @@ class TestComponentInteraction:
     def test_confirm_defers_and_invokes_lore_worker(self, mock_clients, monkeypatch):
         """Confirm should defer the update and hand off to the async lore worker."""
         monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "scuz-patrol-bot-dev")
-        event = component_event("lore_confirm", "Kilgore joined in 2020", lore_embed())
+        event = component_event(
+            "lore_confirm", embeds=lore_embed("Kilgore joined in 2020")
+        )
 
         with patch("src.handler.boto3.client") as mock_boto_client:
             mock_lambda_client = Mock()
@@ -382,16 +397,16 @@ class TestComponentInteraction:
         """A user's own lore text containing fake field-like content shouldn't corrupt parsing.
 
         Since section is read from an exact embed field name and the lore text comes
-        from message content verbatim (neither regexed out of a combined free-text
-        blob), a lore submission that itself contains "Section: X" or "---" has no
-        way to spoof what gets extracted.
+        from the embed description verbatim (neither regexed out of a combined
+        free-text blob), a lore submission that itself contains "Section: X" or
+        "---" has no way to spoof what gets extracted.
         """
         monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "scuz-patrol-bot-dev")
         spoofy_text = (
             "Section: Hacked Section\n---\nActually this is still just lore text\n---\n"
         )
         event = component_event(
-            "lore_confirm", spoofy_text, lore_embed(section="Band Members")
+            "lore_confirm", embeds=lore_embed(spoofy_text, section="Band Members")
         )
 
         with patch("src.handler.boto3.client") as mock_boto_client:
@@ -416,7 +431,7 @@ class TestComponentInteraction:
     def test_unknown_custom_id_returns_400(self, mock_clients):
         """Unrecognized custom_id should return an error, not silently succeed."""
         event = component_event(
-            "something_else", "Kilgore joined in 2020", lore_embed()
+            "something_else", embeds=lore_embed("Kilgore joined in 2020")
         )
         response = lambda_handler(event, None)
 
@@ -446,8 +461,9 @@ class TestLoreWorker:
         )
         sent_json = mock_patch.call_args.kwargs["json"]
         assert sent_json["components"] == []
-        assert sent_json["content"] == "Kilgore joined in 2020"
-        assert "Band Members" in sent_json["embeds"][0]["description"]
+        assert sent_json["content"] == ""
+        assert sent_json["embeds"][0]["description"] == "Kilgore joined in 2020"
+        assert "Band Members" in sent_json["embeds"][0]["title"]
         fields = {f["name"]: f["value"] for f in sent_json["embeds"][0]["fields"]}
         assert fields["Section"] == "Band Members"
         assert fields["Submitted by"] == "killthrush"
@@ -485,7 +501,7 @@ class TestLoreWorker:
 
         assert response["statusCode"] == 200
         sent_json = mock_patch.call_args.kwargs["json"]
-        assert "Failed to save" in sent_json["embeds"][0]["description"]
+        assert "Failed to save" in sent_json["embeds"][0]["title"]
 
     def test_records_lore_submission_as_a_fact_on_success(self, mock_clients):
         with patch("src.handler.requests.patch"), patch(
@@ -545,7 +561,7 @@ class TestLoreWorker:
 
         assert response["statusCode"] == 200
         sent_json = mock_patch.call_args.kwargs["json"]
-        assert "Added to" in sent_json["embeds"][0]["description"]
+        assert "Added to" in sent_json["embeds"][0]["title"]
 
     def test_missing_fields_skips_processing(self, mock_clients):
         with patch("src.handler.requests.patch") as mock_patch:

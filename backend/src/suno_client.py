@@ -70,6 +70,10 @@ CREDIT_HANDLES = CANON_HANDLES - ALWAYS_CANON_HANDLES
 # recording (for reference) but never belong in the canon doc.
 LYRICS_DELIMITER = "+×÷"
 
+# Some accounts (observed on alfredokilgore and metrivus) format the lyric
+# box with a plain horizontal rule of hyphens instead of LYRICS_DELIMITER.
+_HYPHEN_RULE_RE = re.compile(r"^-{10,}$", re.MULTILINE)
+
 SONG_ARTIFACT_PREFIX = "songs/"
 
 
@@ -246,14 +250,22 @@ def _is_credits_only_caption(caption: str) -> bool:
 
 
 def _split_lyric_box(prompt: str) -> Tuple[str, Optional[str]]:
-    """Split Suno's lyric box into (backstory, lyrics) on LYRICS_DELIMITER.
+    """Split Suno's lyric box into (backstory, lyrics).
 
-    Falls back to treating the whole field as backstory if the delimiter
-    isn't present (older/malformed prompts).
+    Different accounts format the divider differently -- some use the
+    literal LYRICS_DELIMITER symbol string, others (alfredokilgore,
+    metrivus) use a plain horizontal rule of hyphens on its own line. Falls
+    back to treating the whole field as backstory if neither is present
+    (older/malformed prompts).
     """
     if LYRICS_DELIMITER in prompt:
         backstory, _, lyrics = prompt.partition(LYRICS_DELIMITER)
         return backstory.strip(), (lyrics.strip() or None)
+
+    match = _HYPHEN_RULE_RE.search(prompt)
+    if match:
+        return prompt[: match.start()].strip(), (prompt[match.end() :].strip() or None)
+
     return prompt.strip(), None
 
 

@@ -125,17 +125,18 @@ def _build_lore_confirmation_message(
 ) -> Dict[str, Any]:
     """Build a Discord message asking the user to confirm/discard new lore.
 
-    The lore text lives in the message content, not an embed field — Discord
-    caps field values at 1024 chars, too small for a fact up to
-    fact_store.MAX_FACT_LENGTH (2000). Section and submitter are still stored
-    as structured embed fields (not interpolated into free text) so a later
-    button click can recover them by reading exact field values — no
-    delimiter for a user's own submitted text to spoof or corrupt, unlike
-    parsing them back out of a formatted string.
+    The lore text lives in the embed description (4096-char cap), not the
+    message content (2000-char cap) or an embed field (1024-char cap) --
+    the length check in _handle_async_worker guarantees it always fits here.
+    Section and submitter are still stored as structured embed fields (not
+    interpolated into free text) so a later button click can recover them by
+    reading exact field values — no delimiter for a user's own submitted
+    text to spoof or corrupt, unlike parsing them back out of a formatted
+    string.
     """
     embed = {
-        "title": "🆕 New lore suggestion",
-        "description": "Add this to the canon?",
+        "title": "🆕 New lore suggestion — add this to the canon?",
+        "description": text,
         "fields": [
             {"name": "Section", "value": section},
             {"name": "Submitted by", "value": submitted_by},
@@ -160,7 +161,7 @@ def _build_lore_confirmation_message(
             ],
         }
     ]
-    return {"content": text, "embeds": [embed], "components": components}
+    return {"content": "", "embeds": [embed], "components": components}
 
 
 def _build_lore_result_message(
@@ -168,43 +169,40 @@ def _build_lore_result_message(
 ) -> Dict[str, Any]:
     """Build the post-click version of a lore confirmation message.
 
-    Keeps the lore text (in content) and Section/Submitted by fields visible
-    instead of wiping them, so anyone scrolling back can still see what was
-    confirmed or discarded (and by whom) rather than just a bare status line
-    with no context.
+    Keeps the lore text (in the embed description) and Section/Submitted by
+    fields visible instead of wiping them, so anyone scrolling back can
+    still see what was confirmed or discarded (and by whom) rather than
+    just a bare status line with no context.
     """
     embed = {
-        "title": "🆕 New lore suggestion",
-        "description": status_line,
+        "title": f"🆕 New lore suggestion — {status_line}",
+        "description": text,
         "fields": [
             {"name": "Section", "value": section},
             {"name": "Submitted by", "value": submitted_by},
         ],
     }
-    return {"content": text, "embeds": [embed], "components": []}
+    return {"content": "", "embeds": [embed], "components": []}
 
 
-def _parse_lore_message(
-    content: str, embeds: List[Dict[str, Any]]
-) -> Optional[Dict[str, str]]:
+def _parse_lore_message(embeds: List[Dict[str, Any]]) -> Optional[Dict[str, str]]:
     """Recover the lore text, section, and submitter from a confirmation message.
 
-    The lore text is read from the message content itself (not an embed
-    field), since it can run up to fact_store.MAX_FACT_LENGTH chars, well
-    past Discord's 1024-char embed field cap. Section/submitter stay in
-    embed fields, read by exact name so a user's own lore text has nothing
-    to spoof.
+    Section/submitter come from embed fields, read by exact name so a
+    user's own lore text has nothing to spoof; the lore text itself comes
+    from the embed description, where _build_lore_confirmation_message put it.
     """
-    if not content or not embeds:
+    if not embeds:
         return None
 
     fields = {f.get("name"): f.get("value") for f in embeds[0].get("fields", [])}
     section = fields.get("Section")
-    if not section:
+    text = embeds[0].get("description")
+    if not section or not text:
         return None
     return {
         "section": section,
-        "text": content,
+        "text": text,
         "submitted_by": fields.get("Submitted by") or "Unknown",
     }
 
@@ -263,11 +261,14 @@ def _handle_async_worker(event: Dict[str, Any]) -> Dict[str, Any]:
     result = _process_message(message)
 
     if result.get("intent") == "new_lore":
-        if len(message) > fact_store.MAX_FACT_LENGTH:
+        # Bounded by Discord's embed description cap, not fact_store.MAX_FACT_LENGTH
+        # (which is sized for Suno-mined content that never touches Discord) --
+        # the confirmation prompt has to round-trip this text through one embed.
+        if len(message) > DISCORD_EMBED_DESCRIPTION_LIMIT:
             _send_discord_followup(
                 interaction_token,
                 f"⚠️ That's {len(message)} characters — lore submissions are capped at "
-                f"{fact_store.MAX_FACT_LENGTH}. Please shorten it and try again.",
+                f"{DISCORD_EMBED_DESCRIPTION_LIMIT}. Please shorten it and try again.",
             )
             return {"statusCode": 200}
 
@@ -341,9 +342,7 @@ def _handle_component_interaction(parsed_event: Dict[str, Any]) -> Dict[str, Any
     custom_id = parsed_event.get("custom_id")
     interaction_token = parsed_event.get("interaction_token")
 
-    parsed_lore = _parse_lore_message(
-        parsed_event.get("message_content", ""), parsed_event.get("message_embeds", [])
-    )
+    parsed_lore = _parse_lore_message(parsed_event.get("message_embeds", []))
 
     if custom_id == "lore_discard":
         if parsed_lore:

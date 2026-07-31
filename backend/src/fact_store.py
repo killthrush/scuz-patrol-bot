@@ -21,7 +21,12 @@ from src import reconstruction_trigger  # noqa: F401 -- call site short-circuite
 
 logger = logging.getLogger()
 
-MAX_FACT_LENGTH = 2000
+# Sized for the longest Suno-mined content seen in practice (full-song
+# lyrics can run ~4000 chars) plus headroom, not for Discord's message
+# limits -- Suno-mined facts never round-trip through a Discord message.
+# The /lore confirm flow enforces its own, tighter bound (see handler.py)
+# since that content does have to fit in a single Discord embed.
+MAX_FACT_LENGTH = 6000
 
 STATUS_PENDING = "pending"
 STATUS_INTEGRATED = "integrated"
@@ -65,8 +70,8 @@ def put_fact(
     """Write a new fact to the store.
 
     Args:
-        content: The lore text itself. Capped at MAX_FACT_LENGTH so a single
-            fact can't blow out the doc-reconstruction prompt later.
+        content: The lore text itself. Capped at MAX_FACT_LENGTH as a sanity
+            ceiling on any single fact's size.
         section_hint: Suggested canon doc section (from Claude's classification).
         handle: Who said it -- a Discord username or a Suno account handle.
         source: Where it came from, e.g. "discord_lore" or "suno_reply".

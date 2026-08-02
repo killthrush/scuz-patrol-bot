@@ -80,7 +80,7 @@ class TestHandlerDeferredResponse:
         confirmation can record who actually wrote the lore."""
         monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "scuz-patrol-bot-dev")
         event = command_event(
-            "lore", "content", "Kilgore joined in 2020", user_name="metrivus"
+            "lore", "content", "Kilgore joined in 2020", user_name="metrivusmusic"
         )
 
         with patch("src.handler.boto3.client") as mock_boto_client:
@@ -90,7 +90,7 @@ class TestHandlerDeferredResponse:
 
         payload = json.loads(mock_lambda_client.invoke.call_args.kwargs["Payload"])
         assert payload["source"] == "discord_lore_intake_worker"
-        assert payload["user_name"] == "metrivus"
+        assert payload["user_name"] == "metrivusmusic"
 
     def test_missing_message_returns_400(self, mock_clients):
         """A known command with no text option should 400 without deferring."""
@@ -116,7 +116,7 @@ class TestLoreAuthorization:
     def test_allowed_submitter_gets_deferred(self, mock_clients, monkeypatch):
         monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "scuz-patrol-bot-dev")
         event = command_event(
-            "lore", "content", "Kilgore joined in 2020", user_name="metrivus"
+            "lore", "content", "Kilgore joined in 2020", user_name="metrivusmusic"
         )
 
         with patch("src.handler.boto3.client") as mock_boto_client:

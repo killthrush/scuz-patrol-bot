@@ -36,7 +36,15 @@ DISCORD_EMBED_DESCRIPTION_LIMIT = 4096
 
 # Only these Discord usernames may submit lore -- keeps the fact store
 # curated to trusted contributors instead of open to anyone in the server.
-LORE_SUBMITTERS = {"metrivus", "killthrush", "synthypixie"}
+#
+# Discord usernames are a different namespace than Suno handles (see
+# suno_client.CANON_HANDLES) -- same three people, different handle per
+# platform. Confirmed against real historical /lore submissions in the
+# fact store, not guessed:
+#   Discord killthrush    <-> Suno killthrush  (Neville Haunt)
+#   Discord metrivusmusic <-> Suno metrivus    (Alfredo Kilgore)
+#   Discord synthypixie   <-> Suno lubonit84   (KEROSYNTH)
+LORE_SUBMITTERS = {"metrivusmusic", "killthrush", "synthypixie"}
 
 
 def _initialize_secrets() -> None:

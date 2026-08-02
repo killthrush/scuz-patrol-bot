@@ -58,6 +58,35 @@ class TestPutFact:
         call_kwargs = mock_dynamo_client.put_item.call_args.kwargs
         assert call_kwargs["Item"]["title"]["S"] == "Incarcerator"
 
+    def test_lyrics_fact_is_integrated_immediately(self, mock_dynamo_client):
+        """Lyrics/credit facts never get folded into the doc, so they have
+        nothing to be "pending" on -- unlike lore, which waits on
+        reconstruction."""
+        fact = fact_store.put_fact(
+            content="some lyrics",
+            section_hint="Lyrics Archive",
+            handle="alfredokilgore",
+            source="suno_lyrics_text",
+            source_ref="clip1",
+            category=fact_store.CATEGORY_LYRICS,
+        )
+
+        assert fact["status"] == fact_store.STATUS_INTEGRATED
+        call_kwargs = mock_dynamo_client.put_item.call_args.kwargs
+        assert call_kwargs["Item"]["status"]["S"] == "integrated"
+
+    def test_credit_fact_is_integrated_immediately(self, mock_dynamo_client):
+        fact = fact_store.put_fact(
+            content="[ Metrivus ] Track 3",
+            section_hint="Credits",
+            handle="scuz_patrol",
+            source="suno_caption_credit",
+            source_ref="clip1",
+            category=fact_store.CATEGORY_CREDIT,
+        )
+
+        assert fact["status"] == fact_store.STATUS_INTEGRATED
+
     def test_rejects_content_over_max_length(self, mock_dynamo_client):
         too_long = "x" * (fact_store.MAX_FACT_LENGTH + 1)
 

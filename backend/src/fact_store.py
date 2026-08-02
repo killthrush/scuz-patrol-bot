@@ -92,6 +92,15 @@ def put_fact(
             f"Fact content exceeds {MAX_FACT_LENGTH} characters ({len(content)})"
         )
 
+    # Only CATEGORY_LORE facts wait on reconstruction folding them into the
+    # canon doc. Lyrics/credit facts are recorded but never appended
+    # anywhere, so there's nothing for them to be "pending" on -- they're
+    # settled the moment they're written. (Previously they sat pending until
+    # reconstruct_handler happened to see them and immediately flip them to
+    # integrated; now that reconstruction is short-circuited, that never
+    # happens, so this is set directly here instead.)
+    status = STATUS_INTEGRATED if category != CATEGORY_LORE else STATUS_PENDING
+
     fact = {
         "fact_id": str(uuid.uuid4()),
         "content": content,
@@ -102,7 +111,7 @@ def put_fact(
         "title": title or "",
         "category": category,
         "ingested_at": datetime.now(timezone.utc).isoformat(),
-        "status": STATUS_PENDING,
+        "status": status,
     }
 
     client = boto3.client("dynamodb")

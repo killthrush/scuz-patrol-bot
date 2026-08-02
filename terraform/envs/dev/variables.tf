@@ -33,15 +33,3 @@ variable "provisioned_concurrency" {
   type        = number
   default     = 1
 }
-
-variable "google_doc_id" {
-  description = "Google Doc ID for the Scuz Patrol canon compendium"
-  type        = string
-  default     = "1gJuZ9CBbNz5vQ1xDEDDQRZLI5TyBFGGa4YGvWp1gwgE"
-}
-
-variable "reconstruct_doc_id" {
-  description = "Google Doc ID the reconstruction Lambda writes to (a scratch doc while this pipeline is being tested, separate from the real canon doc)"
-  type        = string
-  default     = "1MotVgI-xpiDxSRUo-2lbekF6AW44bG-yqceOem9DwXo"
-}

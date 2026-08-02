@@ -55,19 +55,6 @@ COMMANDS = [
         ],
     },
     {
-        "name": "ask-beta",
-        "type": 1,
-        "description": "Ask a question, answered directly from the fact store (experimental)",
-        "options": [
-            {
-                "name": "question",
-                "description": "Your question about the band or lore",
-                "type": 3,
-                "required": True,
-            }
-        ],
-    },
-    {
         "name": "refresh-songs",
         "type": 1,
         "description": "Check Suno for new songs and lore dropped by the band's accounts",
@@ -81,22 +68,29 @@ COMMANDS = [
 
 
 def register_commands():
-    """Register all slash commands."""
-    print(f"Registering commands for guild {GUILD_ID}...\n")
+    """Reconcile Discord's registered commands to exactly match COMMANDS.
 
-    for cmd in COMMANDS:
-        try:
-            print(f"Registering /{cmd['name']}...")
-            response = requests.post(API_URL, headers=HEADERS, json=cmd)
-            response.raise_for_status()
-            result = response.json()
-            print(f"  ✓ Success: {json.dumps(result, indent=2)}\n")
-        except requests.exceptions.HTTPError as e:
-            print(f"  ✗ Error: {e.response.status_code} - {e.response.text}\n")
-            sys.exit(1)
-        except Exception as e:
-            print(f"  ✗ Error: {e}\n")
-            sys.exit(1)
+    Uses the bulk-overwrite PUT endpoint rather than per-command POST --
+    POST only creates/updates by name, it never removes a command that's
+    no longer in the list, which silently left stale commands (e.g.
+    /ask-beta after it was folded into /ask) registered in Discord's UI.
+    PUT replaces the guild's entire command set with exactly what's given.
+    """
+    print(f"Registering commands for guild {GUILD_ID}...\n")
+    names = ", ".join(f"/{cmd['name']}" for cmd in COMMANDS)
+    print(f"Reconciling to exactly: {names}\n")
+
+    try:
+        response = requests.put(API_URL, headers=HEADERS, json=COMMANDS)
+        response.raise_for_status()
+        result = response.json()
+        print(f"✓ Success: {json.dumps(result, indent=2)}\n")
+    except requests.exceptions.HTTPError as e:
+        print(f"✗ Error: {e.response.status_code} - {e.response.text}\n")
+        sys.exit(1)
+    except Exception as e:
+        print(f"✗ Error: {e}\n")
+        sys.exit(1)
 
     print("✓ All commands registered. Try typing / in Discord to see them.")
 

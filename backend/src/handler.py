@@ -1,14 +1,14 @@
 """Lambda handler for Scuz Patrol Discord bot.
 
-Receives Discord webhook events, classifies them with Claude,
-and either answers lore questions or writes to the canon Google Doc.
+Receives Discord webhook events and either answers lore questions directly
+from the fact store or records new lore into it. The fact store (DynamoDB)
+is the sole source of truth -- there is no separate canon document.
 
-Discord requires an interaction response within 3 seconds. Since
-classification + Google Docs + Claude calls can exceed that, slash
-commands are acknowledged immediately with a deferred response (type 5),
-then processed by asynchronously self-invoking this same Lambda. The
-async invocation does the real work and posts the answer via Discord's
-follow-up webhook.
+Discord requires an interaction response within 3 seconds. Since Claude
+calls can exceed that, slash commands are acknowledged immediately with a
+deferred response (type 5), then processed by asynchronously self-invoking
+this same Lambda. The async invocation does the real work and posts the
+answer via Discord's follow-up webhook.
 """
 
 import json
@@ -16,13 +16,11 @@ import os
 import logging
 import boto3
 import requests  # type: ignore
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from src.discord_client import parse_discord_event, extract_message_from_event
 from src.claude_client import ClaudeClient
-from src.google_docs_client import GoogleDocsClient
 from src import suno_client
 from src import fact_store
 from src.calibration_queries import CALIBRATION_QUERIES
@@ -73,53 +71,6 @@ def _initialize_secrets() -> None:
 _initialize_secrets()
 
 
-def _process_message(message: str) -> Dict[str, Any]:
-    """Classify a user message and build the response payload.
-
-    Returns a dict with either an "error" key, or "intent" + "content"
-    (plus intent-specific fields like "suggested_section").
-    """
-    try:
-        claude = ClaudeClient()
-        docs = GoogleDocsClient()
-    except ValueError as e:
-        logger.error(f"Failed to initialize clients: {e}")
-        return {"error": "Service initialization failed"}
-
-    try:
-        canon_doc = docs.read_document()
-    except Exception as e:
-        logger.error(f"Failed to read canon doc: {e}")
-        return {"error": "Failed to fetch canon"}
-
-    try:
-        classification = claude.classify_intent(message, canon_doc)
-    except Exception as e:
-        logger.error(f"Failed to classify intent: {e}")
-        return {"error": "Classification failed"}
-
-    logger.info(f"Classification: {classification}")
-    intent = classification.get("intent", "neither")
-
-    if intent == "question":
-        try:
-            answer = claude.answer_question(message, canon_doc)
-            logger.info(f"Generated answer: {answer[:200]}...")
-            return {"intent": "answer", "content": answer}
-        except Exception as e:
-            logger.error(f"Failed to generate answer: {e}")
-            return {"error": "Failed to generate answer"}
-
-    if intent == "new_lore":
-        section = classification.get("suggested_section", "Unexplored Ideas")
-        return {"intent": "new_lore", "suggested_section": section}
-
-    return {
-        "intent": "neither",
-        "content": "I didn't recognize that as Scuz lore. Ask me about the band, characters, or songs!",
-    }
-
-
 def _build_lore_confirmation_message(
     text: str, section: str, submitted_by: str
 ) -> Dict[str, Any]:
@@ -127,7 +78,7 @@ def _build_lore_confirmation_message(
 
     The lore text lives in the embed description (4096-char cap), not the
     message content (2000-char cap) or an embed field (1024-char cap) --
-    the length check in _handle_async_worker guarantees it always fits here.
+    the length check in _handle_lore_intake_worker guarantees it always fits here.
     Section and submitter are still stored as structured embed fields (not
     interpolated into free text) so a later button click can recover them by
     reading exact field values — no delimiter for a user's own submitted
@@ -248,50 +199,69 @@ def _self_invoke_async(source: str, payload_extra: Dict[str, Any]) -> None:
         logger.error(f"Failed to invoke {source}: {e}")
 
 
-def _handle_async_worker(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Do the real work for a deferred command, then notify Discord."""
-    message: Optional[str] = event.get("message")
+def _defer_and_process_lore_intake(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
+    """Acknowledge /lore immediately, build the confirm/discard prompt asynchronously."""
+    _self_invoke_async(
+        "discord_lore_intake_worker",
+        {
+            "text": parsed_event.get("message"),
+            "interaction_token": parsed_event.get("interaction_token"),
+            "user_name": parsed_event.get("user_name"),
+        },
+    )
+
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"type": 5}),  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    }
+
+
+def _handle_lore_intake_worker(event: Dict[str, Any]) -> Dict[str, Any]:
+    """File a /lore submission into a section and send the confirm/discard prompt.
+
+    /lore already declares the submitted text as lore by virtue of being
+    /lore -- unlike the old shared /ask+/lore pipeline, there's no
+    lore/question/neither gate to run here, only "which section does this
+    go in" (suggest_section).
+    """
+    text: Optional[str] = event.get("text")
     interaction_token: Optional[str] = event.get("interaction_token")
     submitted_by: str = event.get("user_name") or "Unknown"
 
-    if not message or not interaction_token:
-        logger.error("Async worker invoked without message or interaction_token")
+    if not text or not interaction_token:
+        logger.error("Lore intake worker invoked without text or interaction_token")
         return {"statusCode": 400}
 
-    result = _process_message(message)
-
-    if result.get("intent") == "new_lore":
-        # Bounded by Discord's embed description cap, not fact_store.MAX_FACT_LENGTH
-        # (which is sized for Suno-mined content that never touches Discord) --
-        # the confirmation prompt has to round-trip this text through one embed.
-        if len(message) > DISCORD_EMBED_DESCRIPTION_LIMIT:
-            _send_discord_followup(
-                interaction_token,
-                f"⚠️ That's {len(message)} characters — lore submissions are capped at "
-                f"{DISCORD_EMBED_DESCRIPTION_LIMIT}. Please shorten it and try again.",
-            )
-            return {"statusCode": 200}
-
-        section = str(result.get("suggested_section", "Unexplored Ideas"))
-        lore_message = _build_lore_confirmation_message(message, section, submitted_by)
+    # Bounded by Discord's embed description cap, not fact_store.MAX_FACT_LENGTH
+    # (which is sized for Suno-mined content that never touches Discord) --
+    # the confirmation prompt has to round-trip this text through one embed.
+    if len(text) > DISCORD_EMBED_DESCRIPTION_LIMIT:
         _send_discord_followup(
             interaction_token,
-            lore_message["content"],
-            components=lore_message["components"],
-            embeds=lore_message["embeds"],
+            f"⚠️ That's {len(text)} characters — lore submissions are capped at "
+            f"{DISCORD_EMBED_DESCRIPTION_LIMIT}. Please shorten it and try again.",
         )
         return {"statusCode": 200}
 
-    reply: str = str(
-        result.get("content") or result.get("error", "Something went wrong.")
+    try:
+        section = ClaudeClient().suggest_section(text)
+    except Exception as e:
+        logger.error(f"Failed to suggest a section for /lore submission: {e}")
+        section = "Unexplored Ideas"
+
+    lore_message = _build_lore_confirmation_message(text, section, submitted_by)
+    _send_discord_followup(
+        interaction_token,
+        lore_message["content"],
+        components=lore_message["components"],
+        embeds=lore_message["embeds"],
     )
-    content = f"> **{message}**\n\n{reply}"
-    _send_discord_followup(interaction_token, content)
     return {"statusCode": 200}
 
 
 def _handle_lore_worker(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Write confirmed lore to the canon doc, then notify Discord."""
+    """Record confirmed lore as a fact, then notify Discord."""
     text: Optional[str] = event.get("text")
     section: Optional[str] = event.get("section")
     interaction_token: Optional[str] = event.get("interaction_token")
@@ -302,28 +272,18 @@ def _handle_lore_worker(event: Dict[str, Any]) -> Dict[str, Any]:
         return {"statusCode": 400}
 
     try:
-        docs = GoogleDocsClient()
-        docs.append_to_section(text, section)
-        status_line = f"✅ Added to **{section}**."
-
-        # Also record this as a fact -- purely additive to the immediate doc
-        # write above (kept so /ask sees new lore right away, a common
-        # workflow), so this content is part of the corpus reconstruction
-        # draws from later instead of being invisible to the fact store.
-        try:
-            fact_store.put_fact(
-                content=text,
-                section_hint=section,
-                handle=submitted_by,
-                source="discord_lore",
-                source_ref=interaction_token,
-                category=fact_store.CATEGORY_LORE,
-            )
-        except Exception as e:
-            logger.error(f"Failed to record /lore submission as a fact: {e}")
+        fact_store.put_fact(
+            content=text,
+            section_hint=section,
+            handle=submitted_by,
+            source="discord_lore",
+            source_ref=interaction_token,
+            category=fact_store.CATEGORY_LORE,
+        )
+        status_line = f"✅ Recorded under **{section}**."
     except Exception as e:
-        logger.error(f"Failed to write lore to canon doc: {e}")
-        status_line = "⚠️ Failed to save this to the canon doc. Please try again."
+        logger.error(f"Failed to record /lore submission as a fact: {e}")
+        status_line = "⚠️ Failed to save this. Please try again."
 
     result_message = _build_lore_result_message(
         text, section, submitted_by, status_line
@@ -403,24 +363,6 @@ def _handle_component_interaction(parsed_event: Dict[str, Any]) -> Dict[str, Any
         "statusCode": 400,
         "headers": {"Content-Type": "application/json"},
         "body": json.dumps({"error": "Unknown interaction"}),
-    }
-
-
-def _defer_and_process_async(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
-    """Acknowledge the interaction immediately, do the real work asynchronously."""
-    _self_invoke_async(
-        "discord_async_worker",
-        {
-            "message": parsed_event.get("message"),
-            "interaction_token": parsed_event.get("interaction_token"),
-            "user_name": parsed_event.get("user_name"),
-        },
-    )
-
-    return {
-        "statusCode": 200,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({"type": 5}),  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
     }
 
 
@@ -543,11 +485,10 @@ def _handle_test_worker(event: Dict[str, Any]) -> Dict[str, Any]:
     """Run every calibration query against answer_question_from_facts, grade
     each answer's fact coverage, and report an aggregate score.
 
-    This exercises the fact-store-direct answering path (not the doc-based
-    /ask), specifically to catch aggregation-quality degradation -- an
-    answer that reads as plausible while quietly dropping one of several
-    facts it should have combined. See calibration_queries.py for how each
-    query is anchored to real fact_ids.
+    This exists to catch aggregation-quality degradation -- an answer that
+    reads as plausible while quietly dropping one of several facts it
+    should have combined. See calibration_queries.py for how each query is
+    anchored to real fact_ids.
     """
     interaction_token: Optional[str] = event.get("interaction_token")
     if not interaction_token:
@@ -555,7 +496,7 @@ def _handle_test_worker(event: Dict[str, Any]) -> Dict[str, Any]:
         return {"statusCode": 400}
 
     try:
-        all_facts = fact_store.get_lore_facts_for_reconstruction()
+        all_facts = fact_store.get_lore_facts()
     except Exception as e:
         logger.error(f"Failed to load facts for calibration run: {e}")
         _send_discord_followup(
@@ -609,10 +550,10 @@ def _handle_test_worker(event: Dict[str, Any]) -> Dict[str, Any]:
     return {"statusCode": 200}
 
 
-def _defer_and_process_ask_beta(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
-    """Acknowledge /ask-beta immediately, answer from the fact store asynchronously."""
+def _defer_and_process_ask(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
+    """Acknowledge /ask immediately, answer from the fact store asynchronously."""
     _self_invoke_async(
-        "discord_ask_beta_worker",
+        "discord_ask_worker",
         {
             "message": parsed_event.get("message"),
             "interaction_token": parsed_event.get("interaction_token"),
@@ -626,26 +567,22 @@ def _defer_and_process_ask_beta(parsed_event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _handle_ask_beta_worker(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Answer a question directly from the fact store instead of the canon doc.
-
-    Lives alongside /ask (unchanged) so the fact-store-direct answering path
-    can be tried against real questions, not just the fixed calibration set
-    in /test.
-    """
+def _handle_ask_worker(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Answer a question directly from the fact store -- the fact store is
+    the sole source of truth, there is no separate canon document."""
     message: Optional[str] = event.get("message")
     interaction_token: Optional[str] = event.get("interaction_token")
 
     if not message or not interaction_token:
-        logger.error("Ask-beta worker invoked without message or interaction_token")
+        logger.error("Ask worker invoked without message or interaction_token")
         return {"statusCode": 400}
 
     try:
-        all_facts = fact_store.get_lore_facts_for_reconstruction()
+        all_facts = fact_store.get_lore_facts()
         claude = ClaudeClient()
         answer = claude.answer_question_from_facts(message, all_facts)
     except Exception as e:
-        logger.error(f"Failed to answer /ask-beta question: {e}")
+        logger.error(f"Failed to answer /ask question: {e}")
         _send_discord_followup(
             interaction_token, "⚠️ Failed to generate an answer. Please try again."
         )
@@ -683,7 +620,6 @@ def _write_candidate(
     candidate: Dict[str, Any],
     clip_id: str,
     claude: Optional[ClaudeClient],
-    canon_doc: Optional[str],
 ) -> None:
     """Classify (if needed) and record one mined candidate as a fact.
 
@@ -706,9 +642,9 @@ def _write_candidate(
 
     if candidate.get("always_canon"):
         section = "Unexplored Ideas"
-        if claude is not None and canon_doc is not None:
+        if claude is not None:
             try:
-                section = claude.suggest_section(candidate["content"], canon_doc)
+                section = claude.suggest_section(candidate["content"])
             except Exception as e:
                 logger.error(
                     f"Failed to get section suggestion for {candidate['source']} "
@@ -717,10 +653,10 @@ def _write_candidate(
         _put_candidate_fact(candidate, section)
         return
 
-    if claude is None or canon_doc is None:
+    if claude is None:
         return
     try:
-        classification = claude.classify_intent(candidate["content"], canon_doc)
+        classification = claude.classify_intent(candidate["content"])
     except Exception as e:
         logger.error(
             f"Failed to classify {candidate['source']} candidate for song {clip_id}: {e}"
@@ -749,16 +685,14 @@ def _process_song_queue_message(message: Dict[str, Any]) -> None:
     candidates, updated_artifact = suno_client.mine_song_facts(clip, comments, artifact)
 
     claude: Optional[ClaudeClient] = None
-    canon_doc: Optional[str] = None
     if any(c["category"] == fact_store.CATEGORY_LORE for c in candidates):
         try:
             claude = ClaudeClient()
-            canon_doc = GoogleDocsClient().read_document()
         except Exception as e:
-            logger.error(f"Failed to init clients for song {clip_id}: {e}")
+            logger.error(f"Failed to init Claude client for song {clip_id}: {e}")
 
     for candidate in candidates:
-        _write_candidate(candidate, clip_id, claude, canon_doc)
+        _write_candidate(candidate, clip_id, claude)
 
     suno_client.save_song_artifact(clip_id, updated_artifact)
 
@@ -777,90 +711,21 @@ def _handle_sqs_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"statusCode": 200}
 
 
-def reconstruct_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Entry point for the reconstruction Lambda -- a separate function from
-    the main bot, but sharing this same container image (Terraform points
-    its container command at this handler specifically).
-
-    Triggered by the one-time EventBridge Schedule that
-    reconstruction_trigger.schedule_reconstruction() pushes back on every
-    fact write, so this only runs once a burst of new facts goes quiet.
-
-    One Claude call synthesizes the *entire* set of non-superseded lore
-    facts (not just newly pending ones) against a fresh read of the current
-    doc, so it can merge coherently, cross-reference across sections, and
-    flag contradictions in-doc instead of guessing -- see
-    ClaudeClient.synthesize_doc. A fact is only marked integrated if it's
-    accounted for AND the section it landed in actually wrote successfully;
-    anything else stays pending for the next debounce cycle to retry, so a
-    partial failure can't silently lose a fact.
-
-    Lyrics/credit facts skip synthesis entirely -- they're recorded for
-    reference, never folded into canon, so they're marked integrated as soon
-    as they're seen.
-    """
-    pending = fact_store.get_pending_facts()
-    if not pending:
-        logger.info("Reconstruction triggered with no pending facts, nothing to do")
-        return {"statusCode": 200}
-
-    doc_version = datetime.now(timezone.utc).isoformat()
-    pending_lore_ids = set()
-
-    for fact in pending:
-        if fact.get("category", fact_store.CATEGORY_LORE) != fact_store.CATEGORY_LORE:
-            try:
-                fact_store.mark_integrated(fact["fact_id"], doc_version)
-            except Exception as e:
-                logger.error(f"Failed to integrate fact {fact['fact_id']}: {e}")
-        else:
-            pending_lore_ids.add(fact["fact_id"])
-
-    if not pending_lore_ids:
-        return {"statusCode": 200}
-
-    all_lore_facts = fact_store.get_lore_facts_for_reconstruction()
-    docs = GoogleDocsClient()
-
-    try:
-        current_doc = docs.read_document()
-        result = ClaudeClient().synthesize_doc(current_doc, all_lore_facts)
-    except Exception as e:
-        logger.error(f"Doc synthesis failed, leaving all pending facts for retry: {e}")
-        return {"statusCode": 200}
-
-    sections_written = set()
-    for section in result["doc_sections"]:
-        try:
-            docs.replace_section_content(section["name"], section["content"])
-            sections_written.add(section["name"])
-        except Exception as e:
-            logger.error(f"Failed to write section '{section['name']}': {e}")
-
-    accounting_by_id = {item["fact_id"]: item for item in result["fact_accounting"]}
-
-    for fact_id in pending_lore_ids:
-        accounted = accounting_by_id.get(fact_id)
-        if accounted is None:
-            logger.warning(
-                f"Fact {fact_id} missing from synthesis accounting, leaving pending"
-            )
-            continue
-        if (
-            accounted["status"] != "already_present"
-            and accounted.get("section") not in sections_written
-        ):
-            logger.warning(
-                f"Fact {fact_id} accounted for section "
-                f"'{accounted.get('section')}' which failed to write, leaving pending"
-            )
-            continue
-        try:
-            fact_store.mark_integrated(fact_id, doc_version)
-        except Exception as e:
-            logger.error(f"Failed to mark fact {fact_id} integrated: {e}")
-
-    return {"statusCode": 200}
+def _defer_extracting_message(
+    parsed_event: Dict[str, Any], defer_fn: Any
+) -> Dict[str, Any]:
+    """Shared plumbing for commands that take a single text option: extract
+    the message, 400 if missing, otherwise hand off to the given defer_fn."""
+    message = extract_message_from_event(parsed_event)
+    if not message:
+        logger.warning("No message extracted from event")
+        return {
+            "statusCode": 400,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "No message found"}),
+        }
+    parsed_event["message"] = message
+    return defer_fn(parsed_event)
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -868,7 +733,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     Args:
         event: API Gateway event (contains Discord webhook POST body), or an
-            async self-invocation payload (source == 'discord_async_worker')
+            async self-invocation payload (source == 'discord_ask_worker', etc.)
         context: Lambda context
 
     Returns:
@@ -881,8 +746,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     # This Lambda self-invokes asynchronously to do slow work outside
     # Discord's 3-second interaction window; recognize those invocations.
-    if event.get("source") == "discord_async_worker":
-        return _handle_async_worker(event)
+    if event.get("source") == "discord_lore_intake_worker":
+        return _handle_lore_intake_worker(event)
 
     if event.get("source") == "discord_lore_worker":
         return _handle_lore_worker(event)
@@ -893,8 +758,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if event.get("source") == "discord_test_worker":
         return _handle_test_worker(event)
 
-    if event.get("source") == "discord_ask_beta_worker":
-        return _handle_ask_beta_worker(event)
+    if event.get("source") == "discord_ask_worker":
+        return _handle_ask_worker(event)
 
     try:
         logger.info(f"Received event: {json.dumps(event)}")
@@ -924,41 +789,27 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return _handle_component_interaction(parsed_event)
 
         # /refresh-songs and /test take no text option, so they can't go
-        # through the extract_message_from_event path below
+        # through _defer_extracting_message below
         if parsed_event.get("command_name") == "refresh-songs":
             return _defer_and_process_song_refresh(parsed_event)
 
         if parsed_event.get("command_name") == "test":
             return _defer_and_process_test(parsed_event)
 
-        # /ask-beta answers directly from the fact store instead of the
-        # canon doc -- route it separately so it doesn't fall into the
-        # classify-then-act pipeline /ask and /lore share below.
-        if parsed_event.get("command_name") == "ask-beta":
-            message = extract_message_from_event(parsed_event)
-            if not message:
-                logger.warning("No message extracted from event")
-                return {
-                    "statusCode": 400,
-                    "headers": {"Content-Type": "application/json"},
-                    "body": json.dumps({"error": "No message found"}),
-                }
-            parsed_event["message"] = message
-            return _defer_and_process_ask_beta(parsed_event)
+        if parsed_event.get("command_name") == "ask":
+            return _defer_extracting_message(parsed_event, _defer_and_process_ask)
 
-        # Extract the user's message
-        message = extract_message_from_event(parsed_event)
-        if not message:
-            logger.warning("No message extracted from event")
-            return {
-                "statusCode": 400,
-                "headers": {"Content-Type": "application/json"},
-                "body": json.dumps({"error": "No message found"}),
-            }
+        if parsed_event.get("command_name") == "lore":
+            return _defer_extracting_message(
+                parsed_event, _defer_and_process_lore_intake
+            )
 
-        logger.info(f"User message: {message}")
-        parsed_event["message"] = message
-        return _defer_and_process_async(parsed_event)
+        logger.warning(f"Unhandled command: {parsed_event.get('command_name')}")
+        return {
+            "statusCode": 400,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "Unknown command"}),
+        }
 
     except Exception as e:
         logger.error(f"Unhandled error: {e}", exc_info=True)

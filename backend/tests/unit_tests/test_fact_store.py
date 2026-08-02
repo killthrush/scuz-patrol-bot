@@ -33,7 +33,7 @@ class TestPutFact:
         assert fact["handle"] == "killthrush"
         assert fact["source"] == "discord_lore"
         assert fact["source_ref"] == "msg123"
-        assert fact["status"] == fact_store.STATUS_PENDING
+        assert fact["status"] == fact_store.STATUS_INTEGRATED
         assert fact["fact_id"]
         assert fact["ingested_at"]
         assert fact["title"] == ""
@@ -42,7 +42,7 @@ class TestPutFact:
         call_kwargs = mock_dynamo_client.put_item.call_args.kwargs
         assert call_kwargs["TableName"] == "test-facts-table"
         assert call_kwargs["Item"]["content"]["S"] == "Kilgore joined in 2020"
-        assert call_kwargs["Item"]["status"]["S"] == "pending"
+        assert call_kwargs["Item"]["status"]["S"] == "integrated"
 
     def test_stores_title_when_provided(self, mock_dynamo_client):
         fact = fact_store.put_fact(
@@ -57,35 +57,6 @@ class TestPutFact:
         assert fact["title"] == "Incarcerator"
         call_kwargs = mock_dynamo_client.put_item.call_args.kwargs
         assert call_kwargs["Item"]["title"]["S"] == "Incarcerator"
-
-    def test_lyrics_fact_is_integrated_immediately(self, mock_dynamo_client):
-        """Lyrics/credit facts never get folded into the doc, so they have
-        nothing to be "pending" on -- unlike lore, which waits on
-        reconstruction."""
-        fact = fact_store.put_fact(
-            content="some lyrics",
-            section_hint="Lyrics Archive",
-            handle="alfredokilgore",
-            source="suno_lyrics_text",
-            source_ref="clip1",
-            category=fact_store.CATEGORY_LYRICS,
-        )
-
-        assert fact["status"] == fact_store.STATUS_INTEGRATED
-        call_kwargs = mock_dynamo_client.put_item.call_args.kwargs
-        assert call_kwargs["Item"]["status"]["S"] == "integrated"
-
-    def test_credit_fact_is_integrated_immediately(self, mock_dynamo_client):
-        fact = fact_store.put_fact(
-            content="[ Metrivus ] Track 3",
-            section_hint="Credits",
-            handle="scuz_patrol",
-            source="suno_caption_credit",
-            source_ref="clip1",
-            category=fact_store.CATEGORY_CREDIT,
-        )
-
-        assert fact["status"] == fact_store.STATUS_INTEGRATED
 
     def test_rejects_content_over_max_length(self, mock_dynamo_client):
         too_long = "x" * (fact_store.MAX_FACT_LENGTH + 1)
@@ -127,44 +98,23 @@ class TestPutFact:
                 source_ref="msg123",
             )
 
-    def test_reconstruction_debounce_is_short_circuited(self, mock_dynamo_client):
-        """Doc reconstruction is intentionally disabled while /test evaluates
-        answering directly from the fact store -- see fact_store.put_fact.
-        Re-enable the schedule_reconstruction() call there and swap this
-        assertion back to assert_called_once() when reconstruction resumes.
-        """
-        with patch(
-            "src.fact_store.reconstruction_trigger.schedule_reconstruction"
-        ) as mock_schedule:
-            fact = fact_store.put_fact(
-                content="Kilgore joined in 2020",
-                section_hint="Band Members",
-                handle="killthrush",
-                source="discord_lore",
-                source_ref="msg123",
-            )
 
-        assert not mock_schedule.called
-        assert fact["content"] == "Kilgore joined in 2020"
-        assert mock_dynamo_client.put_item.called
+class TestGetLoreFacts:
+    """Test the corpus /ask and /test answer from."""
 
-
-class TestGetPendingFacts:
-    """Test querying facts not yet integrated into the canon doc."""
-
-    def test_returns_deserialized_pending_facts(self, mock_dynamo_client):
+    def test_returns_deserialized_lore_facts(self, mock_dynamo_client):
         mock_dynamo_client.query.return_value = {
             "Items": [
                 {
                     "fact_id": {"S": "f1"},
                     "content": {"S": "Kilgore joined in 2020"},
-                    "status": {"S": "pending"},
+                    "status": {"S": "integrated"},
                     "ingested_at": {"S": "2026-01-01T00:00:00+00:00"},
                 }
             ]
         }
 
-        facts = fact_store.get_pending_facts()
+        facts = fact_store.get_lore_facts()
 
         assert len(facts) == 1
         assert facts[0]["fact_id"] == "f1"
@@ -173,82 +123,18 @@ class TestGetPendingFacts:
         call_kwargs = mock_dynamo_client.query.call_args.kwargs
         assert call_kwargs["TableName"] == "test-facts-table"
         assert call_kwargs["IndexName"] == "status-ingested_at-index"
-        assert call_kwargs["ExpressionAttributeValues"][":status"] == {"S": "pending"}
-        assert call_kwargs["ScanIndexForward"] is True
-
-    def test_returns_empty_list_when_no_pending_facts(self, mock_dynamo_client):
-        mock_dynamo_client.query.return_value = {"Items": []}
-
-        facts = fact_store.get_pending_facts()
-
-        assert facts == []
-
-
-class TestGetLoreFactsForReconstruction:
-    """Test the full-context query reconstruction synthesizes from."""
-
-    def test_combines_pending_and_integrated_lore_facts(self, mock_dynamo_client):
-        mock_dynamo_client.query.side_effect = [
-            {
-                "Items": [
-                    {
-                        "fact_id": {"S": "f1"},
-                        "content": {"S": "pending fact"},
-                        "status": {"S": "pending"},
-                        "ingested_at": {"S": "2026-01-02T00:00:00+00:00"},
-                    }
-                ]
-            },
-            {
-                "Items": [
-                    {
-                        "fact_id": {"S": "f2"},
-                        "content": {"S": "already integrated fact"},
-                        "status": {"S": "integrated"},
-                        "ingested_at": {"S": "2026-01-01T00:00:00+00:00"},
-                    }
-                ]
-            },
-        ]
-
-        facts = fact_store.get_lore_facts_for_reconstruction()
-
-        assert {f["fact_id"] for f in facts} == {"f1", "f2"}
-        assert mock_dynamo_client.query.call_count == 2
-
-        first_call_kwargs = mock_dynamo_client.query.call_args_list[0].kwargs
-        assert first_call_kwargs["ExpressionAttributeValues"][":status"] == {
-            "S": "pending"
-        }
-        assert first_call_kwargs["ExpressionAttributeValues"][":category"] == {
-            "S": "lore"
-        }
-        second_call_kwargs = mock_dynamo_client.query.call_args_list[1].kwargs
-        assert second_call_kwargs["ExpressionAttributeValues"][":status"] == {
+        assert call_kwargs["ExpressionAttributeValues"][":status"] == {
             "S": "integrated"
         }
+        assert call_kwargs["ExpressionAttributeValues"][":category"] == {"S": "lore"}
+        assert call_kwargs["ScanIndexForward"] is True
 
     def test_returns_empty_list_when_no_lore_facts(self, mock_dynamo_client):
         mock_dynamo_client.query.return_value = {"Items": []}
 
-        facts = fact_store.get_lore_facts_for_reconstruction()
+        facts = fact_store.get_lore_facts()
 
         assert facts == []
-
-
-class TestMarkIntegrated:
-    """Test marking a fact as folded into a canon doc rewrite."""
-
-    def test_updates_status_and_doc_version(self, mock_dynamo_client):
-        fact_store.mark_integrated("f1", "doc-v3")
-
-        call_kwargs = mock_dynamo_client.update_item.call_args.kwargs
-        assert call_kwargs["TableName"] == "test-facts-table"
-        assert call_kwargs["Key"] == {"fact_id": {"S": "f1"}}
-        assert call_kwargs["ExpressionAttributeValues"][":status"] == {
-            "S": "integrated"
-        }
-        assert call_kwargs["ExpressionAttributeValues"][":v"] == {"S": "doc-v3"}
 
 
 class TestSupersedeFact:

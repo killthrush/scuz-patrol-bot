@@ -3,31 +3,33 @@
 import json
 import pytest
 from unittest.mock import Mock, patch
-from src.handler import lambda_handler, reconstruct_handler
+from src.handler import lambda_handler
 
 
 @pytest.fixture
 def mock_clients():
     """Mock all external clients."""
-    with patch("src.handler.ClaudeClient") as mock_claude, patch(
-        "src.handler.GoogleDocsClient"
-    ) as mock_docs:
+    with patch("src.handler.ClaudeClient") as mock_claude:
         mock_claude_instance = Mock()
-        mock_docs_instance = Mock()
         mock_claude.return_value = mock_claude_instance
-        mock_docs.return_value = mock_docs_instance
         yield {
             "claude": mock_claude_instance,
-            "docs": mock_docs_instance,
             "claude_class": mock_claude,
-            "docs_class": mock_docs,
         }
 
 
 def command_event(
-    option_name: str, option_value: str, user_name: str = "killthrush"
+    command_name: str,
+    option_name: str = None,
+    option_value: str = None,
+    user_name: str = "killthrush",
 ) -> dict:
-    """Build a Discord APPLICATION_COMMAND event with one string option."""
+    """Build a Discord APPLICATION_COMMAND event, optionally with one string option."""
+    options = (
+        [{"type": 3, "name": option_name, "value": option_value}]
+        if option_name is not None
+        else []
+    )
     return {
         "headers": {},
         "body": json.dumps(
@@ -35,9 +37,7 @@ def command_event(
                 "type": 2,
                 "token": "interaction_token_abc",
                 "member": {"user": {"id": "123", "username": user_name}},
-                "data": {
-                    "options": [{"type": 3, "name": option_name, "value": option_value}]
-                },
+                "data": {"name": command_name, "options": options},
             }
         ),
     }
@@ -64,25 +64,23 @@ class TestHandlerPingChallenge:
 class TestHandlerDeferredResponse:
     """Slash commands must be acknowledged within Discord's 3s window."""
 
-    def test_defers_response_for_command(self, mock_clients):
-        """A valid command should get an immediate deferred ack, not the answer."""
-        event = command_event("question", "Who is Alfredo?")
+    def test_defers_response_for_ask(self, mock_clients):
+        """A valid /ask command should get an immediate deferred ack, not the answer."""
+        event = command_event("ask", "question", "Who is Alfredo?")
         response = lambda_handler(event, None)
         assert response["statusCode"] == 200
         body = json.loads(response["body"])
         assert body["type"] == 5  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
 
-    def test_defer_threads_submitter_username_to_async_worker(
+    def test_defer_threads_submitter_username_to_lore_intake_worker(
         self, mock_clients, monkeypatch
     ):
-        """The command invoker's username should flow through to the async worker payload.
-
-        This is what lets a later lore confirmation record who actually wrote the
-        lore, since the async worker has no other way to know who invoked /lore.
-        """
+        """The command invoker's username should flow through to the lore
+        intake worker payload -- that's the only way a later lore
+        confirmation can record who actually wrote the lore."""
         monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "scuz-patrol-bot-dev")
         event = command_event(
-            "question", "Kilgore joined in 2020", user_name="metrivus"
+            "lore", "content", "Kilgore joined in 2020", user_name="metrivus"
         )
 
         with patch("src.handler.boto3.client") as mock_boto_client:
@@ -91,10 +89,19 @@ class TestHandlerDeferredResponse:
             lambda_handler(event, None)
 
         payload = json.loads(mock_lambda_client.invoke.call_args.kwargs["Payload"])
+        assert payload["source"] == "discord_lore_intake_worker"
         assert payload["user_name"] == "metrivus"
 
     def test_missing_message_returns_400(self, mock_clients):
-        """Should return 400 when no message found, without deferring."""
+        """A known command with no text option should 400 without deferring."""
+        event = command_event("ask")
+        response = lambda_handler(event, None)
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert "error" in body
+
+    def test_unknown_command_returns_400(self, mock_clients):
+        """An unrecognized command name should 400, not silently fall through."""
         event = {"body": json.dumps({"type": 2, "data": {}})}
         response = lambda_handler(event, None)
         assert response["statusCode"] == 400
@@ -102,58 +109,40 @@ class TestHandlerDeferredResponse:
         assert "error" in body
 
 
-class TestAsyncWorkerProcessing:
-    """Test the async self-invocation that does the real classification work."""
+class TestLoreIntakeWorker:
+    """Test the async worker that builds /lore's confirm/discard prompt.
 
-    def async_event(
+    /lore already declares its text as lore by virtue of being /lore --
+    unlike the old shared /ask+/lore pipeline, there's no lore/question/
+    neither gate here, only "which section" (suggest_section).
+    """
+
+    def intake_event(
         self,
-        message="Who is Alfredo?",
+        text="Kilgore joined in 2020",
         interaction_token="interaction_token_abc",
         user_name="killthrush",
     ):
         return {
-            "source": "discord_async_worker",
-            "message": message,
+            "source": "discord_lore_intake_worker",
+            "text": text,
             "interaction_token": interaction_token,
             "user_name": user_name,
         }
 
-    def test_question_intent(self, mock_clients):
-        """Should answer lore questions and post the answer as a follow-up."""
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "question",
-            "confidence": 0.95,
-        }
-        mock_clients[
-            "claude"
-        ].answer_question.return_value = "Here's the answer about Scuz Patrol..."
-        mock_clients["docs"].read_document.return_value = "Canon doc content"
+    def test_sends_confirm_prompt_with_suggested_section(self, mock_clients):
+        mock_clients["claude"].suggest_section.return_value = "Band Members"
 
         with patch("src.handler.requests.patch") as mock_patch:
-            response = lambda_handler(self.async_event(), None)
+            response = lambda_handler(self.intake_event(), None)
 
         assert response["statusCode"] == 200
-        assert mock_patch.called
-        sent_content = mock_patch.call_args.kwargs["json"]["content"]
-        assert "Here's the answer" in sent_content
-
-    def test_new_lore_intent(self, mock_clients):
-        """Should send a Confirm/Discard prompt with lore text in the embed
-        description, section/submitter as embed fields."""
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "new_lore",
-            "confidence": 0.88,
-            "suggested_section": "Band Members",
-        }
-        mock_clients["docs"].read_document.return_value = "Canon doc content"
-
-        with patch("src.handler.requests.patch") as mock_patch:
-            response = lambda_handler(self.async_event(), None)
-
-        assert response["statusCode"] == 200
+        mock_clients["claude"].suggest_section.assert_called_once_with(
+            "Kilgore joined in 2020"
+        )
         sent_json = mock_patch.call_args.kwargs["json"]
         assert sent_json["content"] == ""
-        assert sent_json["embeds"][0]["description"] == "Who is Alfredo?"
+        assert sent_json["embeds"][0]["description"] == "Kilgore joined in 2020"
         fields = {f["name"]: f["value"] for f in sent_json["embeds"][0]["fields"]}
         assert fields["Section"] == "Band Members"
         assert fields["Submitted by"] == "killthrush"
@@ -164,133 +153,44 @@ class TestAsyncWorkerProcessing:
         }
         assert custom_ids == {"lore_confirm", "lore_discard"}
 
-    def test_new_lore_intent_over_length_cap_is_rejected(self, mock_clients):
+    def test_over_length_cap_is_rejected(self, mock_clients):
         """A lore submission over the Discord embed limit should get an
         error, not a confirm prompt -- this is bounded by
         DISCORD_EMBED_DESCRIPTION_LIMIT, not fact_store.MAX_FACT_LENGTH,
         since the confirmation prompt has to fit in one Discord embed."""
         from src.handler import DISCORD_EMBED_DESCRIPTION_LIMIT
 
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "new_lore",
-            "suggested_section": "Band Members",
-        }
-        mock_clients["docs"].read_document.return_value = "Canon doc content"
         too_long = "x" * (DISCORD_EMBED_DESCRIPTION_LIMIT + 1)
 
         with patch("src.handler.requests.patch") as mock_patch:
-            response = lambda_handler(self.async_event(message=too_long), None)
+            response = lambda_handler(self.intake_event(text=too_long), None)
 
         assert response["statusCode"] == 200
         sent_json = mock_patch.call_args.kwargs["json"]
         assert str(DISCORD_EMBED_DESCRIPTION_LIMIT) in sent_json["content"]
         assert sent_json.get("components") is None
         assert sent_json.get("embeds") is None
+        assert not mock_clients["claude"].suggest_section.called
 
-    def test_neither_intent(self, mock_clients):
-        """Should handle off-topic messages."""
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "neither",
-            "confidence": 0.92,
-        }
-        mock_clients["docs"].read_document.return_value = "Canon doc content"
+    def test_section_suggestion_failure_falls_back_to_unexplored_ideas(
+        self, mock_clients
+    ):
+        mock_clients["claude"].suggest_section.side_effect = Exception("API error")
 
         with patch("src.handler.requests.patch") as mock_patch:
-            response = lambda_handler(self.async_event(), None)
+            response = lambda_handler(self.intake_event(), None)
 
         assert response["statusCode"] == 200
-        sent_content = mock_patch.call_args.kwargs["json"]["content"]
-        assert "Scuz lore" in sent_content
+        sent_json = mock_patch.call_args.kwargs["json"]
+        fields = {f["name"]: f["value"] for f in sent_json["embeds"][0]["fields"]}
+        assert fields["Section"] == "Unexplored Ideas"
 
-    def test_missing_message_or_token(self, mock_clients):
-        """Should skip processing and not call Discord if data is missing."""
+    def test_missing_text_or_token_returns_400(self, mock_clients):
         with patch("src.handler.requests.patch") as mock_patch:
-            response = lambda_handler(self.async_event(message=None), None)
+            response = lambda_handler(self.intake_event(text=None), None)
 
         assert response["statusCode"] == 400
         assert not mock_patch.called
-
-
-class TestAsyncWorkerErrorHandling:
-    """Test error handling within the async worker path."""
-
-    def test_claude_init_error(self, mock_clients):
-        """Should post the initialization error as the follow-up content."""
-        mock_clients["claude_class"].side_effect = ValueError("Missing API key")
-
-        with patch("src.handler.requests.patch") as mock_patch:
-            response = lambda_handler(
-                {
-                    "source": "discord_async_worker",
-                    "message": "Who?",
-                    "interaction_token": "tok",
-                },
-                None,
-            )
-
-        assert response["statusCode"] == 200
-        sent_content = mock_patch.call_args.kwargs["json"]["content"]
-        assert "Service initialization failed" in sent_content
-
-    def test_canon_doc_read_error(self, mock_clients):
-        """Should handle Google Docs read error."""
-        mock_clients["docs"].read_document.side_effect = Exception("API error")
-
-        with patch("src.handler.requests.patch") as mock_patch:
-            response = lambda_handler(
-                {
-                    "source": "discord_async_worker",
-                    "message": "Who?",
-                    "interaction_token": "tok",
-                },
-                None,
-            )
-
-        assert response["statusCode"] == 200
-        sent_content = mock_patch.call_args.kwargs["json"]["content"]
-        assert "Failed to fetch canon" in sent_content
-
-    def test_classification_error(self, mock_clients):
-        """Should handle classification API error."""
-        mock_clients["claude"].classify_intent.side_effect = Exception("API error")
-        mock_clients["docs"].read_document.return_value = "Canon doc"
-
-        with patch("src.handler.requests.patch") as mock_patch:
-            response = lambda_handler(
-                {
-                    "source": "discord_async_worker",
-                    "message": "Who?",
-                    "interaction_token": "tok",
-                },
-                None,
-            )
-
-        assert response["statusCode"] == 200
-        sent_content = mock_patch.call_args.kwargs["json"]["content"]
-        assert "Classification failed" in sent_content
-
-    def test_answer_generation_error(self, mock_clients):
-        """Should handle answer generation error."""
-        mock_clients["claude"].classify_intent.return_value = {
-            "intent": "question",
-            "confidence": 0.95,
-        }
-        mock_clients["claude"].answer_question.side_effect = Exception("API error")
-        mock_clients["docs"].read_document.return_value = "Canon doc"
-
-        with patch("src.handler.requests.patch") as mock_patch:
-            response = lambda_handler(
-                {
-                    "source": "discord_async_worker",
-                    "message": "Who?",
-                    "interaction_token": "tok",
-                },
-                None,
-            )
-
-        assert response["statusCode"] == 200
-        sent_content = mock_patch.call_args.kwargs["json"]["content"]
-        assert "Failed to generate answer" in sent_content
 
 
 def component_event(custom_id: str, content: str = "", embeds: list = None) -> dict:
@@ -439,11 +339,13 @@ class TestComponentInteraction:
 
 
 class TestLoreWorker:
-    """Test the async worker that writes confirmed lore to the canon doc."""
+    """Test the async worker that records confirmed lore as a fact."""
 
     def test_writes_lore_and_reports_success(self, mock_clients):
         """The confirmed lore text should stay visible in the embed, not just a bare status line."""
-        with patch("src.handler.requests.patch") as mock_patch:
+        with patch("src.handler.requests.patch") as mock_patch, patch(
+            "src.handler.fact_store.put_fact"
+        ) as mock_put_fact:
             response = lambda_handler(
                 {
                     "source": "discord_lore_worker",
@@ -456,13 +358,19 @@ class TestLoreWorker:
             )
 
         assert response["statusCode"] == 200
-        mock_clients["docs"].append_to_section.assert_called_once_with(
-            "Kilgore joined in 2020", "Band Members"
+        mock_put_fact.assert_called_once_with(
+            content="Kilgore joined in 2020",
+            section_hint="Band Members",
+            handle="killthrush",
+            source="discord_lore",
+            source_ref="tok",
+            category="lore",
         )
         sent_json = mock_patch.call_args.kwargs["json"]
         assert sent_json["components"] == []
         assert sent_json["content"] == ""
         assert sent_json["embeds"][0]["description"] == "Kilgore joined in 2020"
+        assert "Recorded under" in sent_json["embeds"][0]["title"]
         assert "Band Members" in sent_json["embeds"][0]["title"]
         fields = {f["name"]: f["value"] for f in sent_json["embeds"][0]["fields"]}
         assert fields["Section"] == "Band Members"
@@ -470,7 +378,9 @@ class TestLoreWorker:
 
     def test_missing_submitted_by_defaults_to_unknown(self, mock_clients):
         """Older/malformed payloads without a submitter shouldn't crash the worker."""
-        with patch("src.handler.requests.patch") as mock_patch:
+        with patch("src.handler.requests.patch") as mock_patch, patch(
+            "src.handler.fact_store.put_fact"
+        ):
             lambda_handler(
                 {
                     "source": "discord_lore_worker",
@@ -485,67 +395,7 @@ class TestLoreWorker:
         fields = {f["name"]: f["value"] for f in sent_json["embeds"][0]["fields"]}
         assert fields["Submitted by"] == "Unknown"
 
-    def test_reports_failure_when_doc_write_fails(self, mock_clients):
-        mock_clients["docs"].append_to_section.side_effect = Exception("API error")
-
-        with patch("src.handler.requests.patch") as mock_patch:
-            response = lambda_handler(
-                {
-                    "source": "discord_lore_worker",
-                    "text": "Kilgore joined in 2020",
-                    "section": "Band Members",
-                    "interaction_token": "tok",
-                },
-                None,
-            )
-
-        assert response["statusCode"] == 200
-        sent_json = mock_patch.call_args.kwargs["json"]
-        assert "Failed to save" in sent_json["embeds"][0]["title"]
-
-    def test_records_lore_submission_as_a_fact_on_success(self, mock_clients):
-        with patch("src.handler.requests.patch"), patch(
-            "src.handler.fact_store.put_fact"
-        ) as mock_put_fact:
-            lambda_handler(
-                {
-                    "source": "discord_lore_worker",
-                    "text": "Kilgore joined in 2020",
-                    "section": "Band Members",
-                    "submitted_by": "killthrush",
-                    "interaction_token": "tok",
-                },
-                None,
-            )
-
-        mock_put_fact.assert_called_once_with(
-            content="Kilgore joined in 2020",
-            section_hint="Band Members",
-            handle="killthrush",
-            source="discord_lore",
-            source_ref="tok",
-            category="lore",
-        )
-
-    def test_fact_not_recorded_when_doc_write_fails(self, mock_clients):
-        mock_clients["docs"].append_to_section.side_effect = Exception("API error")
-
-        with patch("src.handler.requests.patch"), patch(
-            "src.handler.fact_store.put_fact"
-        ) as mock_put_fact:
-            lambda_handler(
-                {
-                    "source": "discord_lore_worker",
-                    "text": "Kilgore joined in 2020",
-                    "section": "Band Members",
-                    "interaction_token": "tok",
-                },
-                None,
-            )
-
-        assert not mock_put_fact.called
-
-    def test_fact_store_failure_does_not_affect_success_message(self, mock_clients):
+    def test_reports_failure_when_fact_store_write_fails(self, mock_clients):
         with patch("src.handler.requests.patch") as mock_patch, patch(
             "src.handler.fact_store.put_fact", side_effect=Exception("DynamoDB error")
         ):
@@ -561,7 +411,7 @@ class TestLoreWorker:
 
         assert response["statusCode"] == 200
         sent_json = mock_patch.call_args.kwargs["json"]
-        assert "Added to" in sent_json["embeds"][0]["title"]
+        assert "Failed to save" in sent_json["embeds"][0]["title"]
 
     def test_missing_fields_skips_processing(self, mock_clients):
         with patch("src.handler.requests.patch") as mock_patch:
@@ -818,7 +668,6 @@ class TestSongQueueWorker:
         monkeypatch.setenv("MANIFEST_BUCKET", "test-bucket")
         monkeypatch.setenv("FACTS_TABLE", "test-facts-table")
         mock_clients["claude"].suggest_section.return_value = "Band Members"
-        mock_clients["docs"].read_document.return_value = "Canon doc"
 
         comments = {
             "results": [
@@ -874,7 +723,6 @@ class TestSongQueueWorker:
         words skip the lore/question/neither gate entirely, and even a
         failed section suggestion doesn't block the write."""
         mock_clients["claude"].suggest_section.side_effect = Exception("API error")
-        mock_clients["docs"].read_document.return_value = "Canon doc"
 
         comments = {
             "results": [
@@ -912,7 +760,6 @@ class TestSongQueueWorker:
 
     def test_new_caption_is_written_to_fact_store(self, mock_clients):
         mock_clients["claude"].suggest_section.return_value = "Band Chronology"
-        mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
             "src.handler.suno_client.fetch_clip",
@@ -940,7 +787,6 @@ class TestSongQueueWorker:
         self, mock_clients
     ):
         mock_clients["claude"].suggest_section.return_value = "Virtual Discography"
-        mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
             "src.handler.suno_client.fetch_clip",
@@ -969,7 +815,6 @@ class TestSongQueueWorker:
         """metrivus/killthrush/lubonit84 aren't always in-character, so their
         replies still go through the lore/question/neither gate."""
         mock_clients["claude"].classify_intent.return_value = {"intent": "neither"}
-        mock_clients["docs"].read_document.return_value = "Canon doc"
 
         comments = {
             "results": [
@@ -1009,7 +854,6 @@ class TestSongQueueWorker:
 
     def test_lyrics_candidate_is_written_without_classification(self, mock_clients):
         mock_clients["claude"].suggest_section.return_value = "Virtual Discography"
-        mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
             "src.handler.suno_client.fetch_clip",
@@ -1040,9 +884,7 @@ class TestSongQueueWorker:
         # Only the backstory candidate needs a section suggestion -- lyrics
         # never do, and neither ever calls classify_intent (no lore gate for
         # always_canon content).
-        mock_clients["claude"].suggest_section.assert_called_once_with(
-            "Some backstory", "Canon doc"
-        )
+        mock_clients["claude"].suggest_section.assert_called_once_with("Some backstory")
         assert not mock_clients["claude"].classify_intent.called
 
     def test_oversized_candidate_is_skipped_not_raised(self, mock_clients):
@@ -1050,7 +892,6 @@ class TestSongQueueWorker:
 
         too_long = "x" * (MAX_FACT_LENGTH + 1)
         mock_clients["claude"].suggest_section.return_value = "Band Chronology"
-        mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
             "src.handler.suno_client.fetch_clip",
@@ -1095,7 +936,6 @@ class TestSongQueueWorker:
 
     def test_processes_each_record_in_a_batch_independently(self, mock_clients):
         mock_clients["claude"].suggest_section.return_value = "Band Chronology"
-        mock_clients["docs"].read_document.return_value = "Canon doc"
 
         with patch(
             "src.handler.suno_client.fetch_clip",
@@ -1122,176 +962,6 @@ class TestSongQueueWorker:
         assert response["statusCode"] == 200
         assert mock_save_artifact.call_count == 2
         assert mock_put_fact.call_count == 2
-
-
-class TestReconstructHandler:
-    """Test the debounced reconstruction Lambda: one-shot doc synthesis from facts."""
-
-    def _lore_fact(self, fact_id, **overrides):
-        fact = {
-            "fact_id": fact_id,
-            "content": "Kilgore joined in 2020",
-            "section_hint": "Band Members",
-            "category": "lore",
-        }
-        fact.update(overrides)
-        return fact
-
-    def test_no_pending_facts_is_a_noop(self, mock_clients):
-        with patch("src.handler.fact_store.get_pending_facts", return_value=[]):
-            response = reconstruct_handler({}, None)
-
-        assert response["statusCode"] == 200
-        assert not mock_clients["docs_class"].called
-        assert not mock_clients["claude_class"].called
-
-    def test_only_non_lore_pending_facts_marks_integrated_without_synthesis(
-        self, mock_clients
-    ):
-        pending = [
-            {"fact_id": "f1", "content": "lyrics", "category": "lyrics"},
-            {"fact_id": "f2", "content": "credit", "category": "credit"},
-        ]
-
-        with patch(
-            "src.handler.fact_store.get_pending_facts", return_value=pending
-        ), patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction"
-        ) as mock_get_lore, patch(
-            "src.handler.fact_store.mark_integrated"
-        ) as mock_mark_integrated:
-            response = reconstruct_handler({}, None)
-
-        assert response["statusCode"] == 200
-        assert mock_mark_integrated.call_count == 2
-        assert not mock_get_lore.called
-        assert not mock_clients["docs_class"].called
-        assert not mock_clients["claude_class"].called
-
-    def test_successful_synthesis_writes_sections_and_marks_facts_integrated(
-        self, mock_clients
-    ):
-        pending = [self._lore_fact("f1"), self._lore_fact("f2")]
-        mock_clients["docs"].read_document.return_value = "current doc text"
-        mock_clients["claude"].synthesize_doc.return_value = {
-            "doc_sections": [{"name": "Band Members", "content": "new body text"}],
-            "fact_accounting": [
-                {"fact_id": "f1", "status": "included", "section": "Band Members"},
-                {"fact_id": "f2", "status": "already_present", "section": None},
-            ],
-        }
-
-        with patch(
-            "src.handler.fact_store.get_pending_facts", return_value=pending
-        ), patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
-            return_value=pending,
-        ), patch(
-            "src.handler.fact_store.mark_integrated"
-        ) as mock_mark_integrated:
-            response = reconstruct_handler({}, None)
-
-        assert response["statusCode"] == 200
-        mock_clients["docs"].replace_section_content.assert_called_once_with(
-            "Band Members", "new body text"
-        )
-        assert mock_mark_integrated.call_count == 2
-        integrated_ids = {c.args[0] for c in mock_mark_integrated.call_args_list}
-        assert integrated_ids == {"f1", "f2"}
-
-    def test_fact_missing_from_accounting_stays_pending(self, mock_clients):
-        pending = [self._lore_fact("f1"), self._lore_fact("f2")]
-        mock_clients["docs"].read_document.return_value = "current doc text"
-        mock_clients["claude"].synthesize_doc.return_value = {
-            "doc_sections": [{"name": "Band Members", "content": "new body text"}],
-            "fact_accounting": [
-                {"fact_id": "f1", "status": "included", "section": "Band Members"},
-                # f2 is silently missing from the accounting.
-            ],
-        }
-
-        with patch(
-            "src.handler.fact_store.get_pending_facts", return_value=pending
-        ), patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
-            return_value=pending,
-        ), patch(
-            "src.handler.fact_store.mark_integrated"
-        ) as mock_mark_integrated:
-            response = reconstruct_handler({}, None)
-
-        assert response["statusCode"] == 200
-        mock_mark_integrated.assert_called_once()
-        assert mock_mark_integrated.call_args.args[0] == "f1"
-
-    def test_fact_accounted_for_a_section_that_failed_to_write_stays_pending(
-        self, mock_clients
-    ):
-        pending = [self._lore_fact("f1"), self._lore_fact("f2")]
-        mock_clients["docs"].read_document.return_value = "current doc text"
-        mock_clients["docs"].replace_section_content.side_effect = Exception(
-            "Docs API error"
-        )
-        mock_clients["claude"].synthesize_doc.return_value = {
-            "doc_sections": [{"name": "Band Members", "content": "new body text"}],
-            "fact_accounting": [
-                {"fact_id": "f1", "status": "included", "section": "Band Members"},
-                {"fact_id": "f2", "status": "already_present", "section": None},
-            ],
-        }
-
-        with patch(
-            "src.handler.fact_store.get_pending_facts", return_value=pending
-        ), patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
-            return_value=pending,
-        ), patch(
-            "src.handler.fact_store.mark_integrated"
-        ) as mock_mark_integrated:
-            response = reconstruct_handler({}, None)
-
-        assert response["statusCode"] == 200
-        # f1's section failed to write -- stays pending. f2 was
-        # "already_present" (no section write needed) -- still integrated.
-        mock_mark_integrated.assert_called_once()
-        assert mock_mark_integrated.call_args.args[0] == "f2"
-
-    def test_synthesis_failure_leaves_all_facts_pending(self, mock_clients):
-        pending = [self._lore_fact("f1")]
-        mock_clients["docs"].read_document.return_value = "current doc text"
-        mock_clients["claude"].synthesize_doc.side_effect = Exception("API error")
-
-        with patch(
-            "src.handler.fact_store.get_pending_facts", return_value=pending
-        ), patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
-            return_value=pending,
-        ), patch(
-            "src.handler.fact_store.mark_integrated"
-        ) as mock_mark_integrated:
-            response = reconstruct_handler({}, None)
-
-        assert response["statusCode"] == 200
-        assert not mock_mark_integrated.called
-        assert not mock_clients["docs"].replace_section_content.called
-
-    def test_read_document_failure_leaves_all_facts_pending(self, mock_clients):
-        pending = [self._lore_fact("f1")]
-        mock_clients["docs"].read_document.side_effect = Exception("Docs API error")
-
-        with patch(
-            "src.handler.fact_store.get_pending_facts", return_value=pending
-        ), patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
-            return_value=pending,
-        ), patch(
-            "src.handler.fact_store.mark_integrated"
-        ) as mock_mark_integrated:
-            response = reconstruct_handler({}, None)
-
-        assert response["statusCode"] == 200
-        assert not mock_mark_integrated.called
-        assert not mock_clients["claude"].synthesize_doc.called
 
 
 def calibration_command_event() -> dict:
@@ -1379,7 +1049,7 @@ class TestCalibrationTestWorker:
         ]
 
         with patch("src.handler.CALIBRATION_QUERIES", self.FAKE_QUERIES), patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            "src.handler.fact_store.get_lore_facts",
             return_value=self._facts(),
         ), patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(
@@ -1409,7 +1079,7 @@ class TestCalibrationTestWorker:
         }
 
         with patch("src.handler.CALIBRATION_QUERIES", queries), patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            "src.handler.fact_store.get_lore_facts",
             return_value=self._facts(),
         ), patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(
@@ -1426,7 +1096,7 @@ class TestCalibrationTestWorker:
 
     def test_fact_load_failure_sends_error_message(self, mock_clients):
         with patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            "src.handler.fact_store.get_lore_facts",
             side_effect=Exception("DynamoDB down"),
         ), patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(
@@ -1448,7 +1118,7 @@ class TestCalibrationTestWorker:
         }
 
         with patch("src.handler.CALIBRATION_QUERIES", self.FAKE_QUERIES), patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            "src.handler.fact_store.get_lore_facts",
             return_value=self._facts(),
         ), patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(
@@ -1465,8 +1135,8 @@ class TestCalibrationTestWorker:
         assert response["statusCode"] == 400
 
 
-def ask_beta_command_event(question: str = "Who is Alfredo Kilgore?") -> dict:
-    """Build a Discord APPLICATION_COMMAND event for /ask-beta."""
+def ask_command_event(question: str = "Who is Alfredo Kilgore?") -> dict:
+    """Build a Discord APPLICATION_COMMAND event for /ask."""
     return {
         "headers": {},
         "body": json.dumps(
@@ -1474,7 +1144,7 @@ def ask_beta_command_event(question: str = "Who is Alfredo Kilgore?") -> dict:
                 "type": 2,
                 "token": "interaction_token_abc",
                 "data": {
-                    "name": "ask-beta",
+                    "name": "ask",
                     "options": [{"type": 3, "name": "question", "value": question}],
                 },
             }
@@ -1482,13 +1152,13 @@ def ask_beta_command_event(question: str = "Who is Alfredo Kilgore?") -> dict:
     }
 
 
-class TestAskBetaDeferred:
-    """/ask-beta answers from the fact store, so it needs its own dispatch path
-    distinct from /ask's classify-then-act pipeline."""
+class TestAskDeferred:
+    """/ask answers directly from the fact store -- verify it defers
+    immediately and hands off to the async ask worker."""
 
     def test_defers_and_invokes_worker(self, mock_clients, monkeypatch):
         monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "scuz-patrol-bot-dev")
-        event = ask_beta_command_event("Who is Alfredo Kilgore?")
+        event = ask_command_event("Who is Alfredo Kilgore?")
 
         with patch("src.handler.boto3.client") as mock_boto_client:
             mock_lambda_client = Mock()
@@ -1500,7 +1170,7 @@ class TestAskBetaDeferred:
         assert body["type"] == 5  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
 
         payload = json.loads(mock_lambda_client.invoke.call_args.kwargs["Payload"])
-        assert payload["source"] == "discord_ask_beta_worker"
+        assert payload["source"] == "discord_ask_worker"
         assert payload["message"] == "Who is Alfredo Kilgore?"
         assert payload["interaction_token"] == "interaction_token_abc"
 
@@ -1508,15 +1178,15 @@ class TestAskBetaDeferred:
         event = {
             "headers": {},
             "body": json.dumps(
-                {"type": 2, "token": "tok", "data": {"name": "ask-beta", "options": []}}
+                {"type": 2, "token": "tok", "data": {"name": "ask", "options": []}}
             ),
         }
         response = lambda_handler(event, None)
         assert response["statusCode"] == 400
 
 
-class TestAskBetaWorker:
-    """Test the async worker backing /ask-beta."""
+class TestAskWorker:
+    """Test the async worker backing /ask."""
 
     def _facts(self):
         return [
@@ -1534,12 +1204,12 @@ class TestAskBetaWorker:
         ].answer_question_from_facts.return_value = "Kilgore is the front-mutant."
 
         with patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            "src.handler.fact_store.get_lore_facts",
             return_value=self._facts(),
         ), patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(
                 {
-                    "source": "discord_ask_beta_worker",
+                    "source": "discord_ask_worker",
                     "message": "Who is Kilgore?",
                     "interaction_token": "tok",
                 },
@@ -1561,12 +1231,12 @@ class TestAskBetaWorker:
         mock_clients["claude"].answer_question_from_facts.return_value = long_answer
 
         with patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            "src.handler.fact_store.get_lore_facts",
             return_value=self._facts(),
         ), patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(
                 {
-                    "source": "discord_ask_beta_worker",
+                    "source": "discord_ask_worker",
                     "message": "Who is Kilgore?",
                     "interaction_token": "tok",
                 },
@@ -1582,12 +1252,12 @@ class TestAskBetaWorker:
         mock_clients["claude"].answer_question_from_facts.return_value = "x" * 5000
 
         with patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            "src.handler.fact_store.get_lore_facts",
             return_value=self._facts(),
         ), patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(
                 {
-                    "source": "discord_ask_beta_worker",
+                    "source": "discord_ask_worker",
                     "message": "Who is Kilgore?",
                     "interaction_token": "tok",
                 },
@@ -1601,12 +1271,12 @@ class TestAskBetaWorker:
 
     def test_fact_load_failure_sends_error_message(self, mock_clients):
         with patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            "src.handler.fact_store.get_lore_facts",
             side_effect=Exception("DynamoDB down"),
         ), patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(
                 {
-                    "source": "discord_ask_beta_worker",
+                    "source": "discord_ask_worker",
                     "message": "Who is Kilgore?",
                     "interaction_token": "tok",
                 },
@@ -1623,12 +1293,12 @@ class TestAskBetaWorker:
         )
 
         with patch(
-            "src.handler.fact_store.get_lore_facts_for_reconstruction",
+            "src.handler.fact_store.get_lore_facts",
             return_value=self._facts(),
         ), patch("src.handler.requests.patch") as mock_patch:
             response = lambda_handler(
                 {
-                    "source": "discord_ask_beta_worker",
+                    "source": "discord_ask_worker",
                     "message": "Who is Kilgore?",
                     "interaction_token": "tok",
                 },
@@ -1641,13 +1311,13 @@ class TestAskBetaWorker:
 
     def test_missing_interaction_token_returns_400(self, mock_clients):
         response = lambda_handler(
-            {"source": "discord_ask_beta_worker", "message": "Who is Kilgore?"}, None
+            {"source": "discord_ask_worker", "message": "Who is Kilgore?"}, None
         )
         assert response["statusCode"] == 400
 
     def test_missing_message_returns_400(self, mock_clients):
         response = lambda_handler(
-            {"source": "discord_ask_beta_worker", "interaction_token": "tok"}, None
+            {"source": "discord_ask_worker", "interaction_token": "tok"}, None
         )
         assert response["statusCode"] == 400
 

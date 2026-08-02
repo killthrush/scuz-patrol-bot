@@ -1,11 +1,10 @@
-"""DynamoDB-backed fact store: the durable ledger of atomic lore facts the
-canon doc gets periodically reconstructed from.
+"""DynamoDB-backed fact store: the durable ledger of atomic lore facts.
+This is the sole source of truth for the canon -- /ask and /test answer
+directly from it, and nothing regenerates a separate document from it.
 
 Facts are append-only. A retcon supersedes an old fact rather than
-overwriting or deleting it, so the audit trail -- and the ability to recover
-from a bad doc rewrite -- never depends on data that's already been
-destroyed. The canon doc itself is treated as a disposable, regeneratable
-projection of whatever facts are currently non-superseded.
+overwriting or deleting it, so the audit trail never depends on data that's
+already been destroyed.
 """
 
 import logging
@@ -17,8 +16,6 @@ from typing import Any, Dict, List, Optional
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
-from src import reconstruction_trigger  # noqa: F401 -- call site short-circuited below
-
 logger = logging.getLogger()
 
 # Sized for the longest Suno-mined content seen in practice (full-song
@@ -28,13 +25,11 @@ logger = logging.getLogger()
 # since that content does have to fit in a single Discord embed.
 MAX_FACT_LENGTH = 6000
 
-STATUS_PENDING = "pending"
 STATUS_INTEGRATED = "integrated"
 STATUS_SUPERSEDED = "superseded"
 
-# What a fact is for, not just where it came from -- lets reconstruction fold
-# "lore" into the canon doc while leaving "lyrics" and "credit" facts
-# recorded-but-untouched (never appended anywhere).
+# What a fact is for, not just where it came from -- "lore" is what /ask and
+# /test answer from; "lyrics" and "credit" are recorded for reference only.
 CATEGORY_LORE = "lore"
 CATEGORY_LYRICS = "lyrics"
 CATEGORY_CREDIT = "credit"
@@ -72,14 +67,13 @@ def put_fact(
     Args:
         content: The lore text itself. Capped at MAX_FACT_LENGTH as a sanity
             ceiling on any single fact's size.
-        section_hint: Suggested canon doc section (from Claude's classification).
+        section_hint: Suggested canon section (from Claude's classification).
         handle: Who said it -- a Discord username or a Suno account handle.
         source: Where it came from, e.g. "discord_lore" or "suno_reply".
         source_ref: An ID tying the fact back to its origin (Discord message/
             interaction ID, Suno reply ID) for audit/traceability.
-        category: What this fact is for -- CATEGORY_LORE facts get folded
-            into the canon doc on reconstruction; CATEGORY_LYRICS and
-            CATEGORY_CREDIT are recorded but never appended anywhere.
+        category: What this fact is for -- CATEGORY_LORE, CATEGORY_LYRICS,
+            or CATEGORY_CREDIT.
         title: Human-readable label for source_ref, e.g. the Suno song title --
             source_ref alone is an opaque ID, not enough to tell which song a
             fact came from without a lookup.
@@ -92,15 +86,6 @@ def put_fact(
             f"Fact content exceeds {MAX_FACT_LENGTH} characters ({len(content)})"
         )
 
-    # Only CATEGORY_LORE facts wait on reconstruction folding them into the
-    # canon doc. Lyrics/credit facts are recorded but never appended
-    # anywhere, so there's nothing for them to be "pending" on -- they're
-    # settled the moment they're written. (Previously they sat pending until
-    # reconstruct_handler happened to see them and immediately flip them to
-    # integrated; now that reconstruction is short-circuited, that never
-    # happens, so this is set directly here instead.)
-    status = STATUS_INTEGRATED if category != CATEGORY_LORE else STATUS_PENDING
-
     fact = {
         "fact_id": str(uuid.uuid4()),
         "content": content,
@@ -111,87 +96,43 @@ def put_fact(
         "title": title or "",
         "category": category,
         "ingested_at": datetime.now(timezone.utc).isoformat(),
-        "status": status,
+        "status": STATUS_INTEGRATED,
     }
 
     client = boto3.client("dynamodb")
     client.put_item(TableName=_table_name(), Item=_to_item(fact))
 
-    # Short-circuited while we evaluate answering directly from the fact
-    # store (see claude_client.answer_question_from_facts / the /test
-    # command) -- the doc is intentionally not being kept current right now.
-    # Re-enable by uncommenting the call below; nothing else needs to change.
-    # try:
-    #     reconstruction_trigger.schedule_reconstruction()
-    # except Exception as e:
-    #     logger.error(f"Failed to schedule reconstruction debounce: {e}")
-
     return fact
 
 
-def get_pending_facts() -> List[Dict[str, Any]]:
-    """Return all facts not yet integrated into the canon doc, oldest first."""
+def get_lore_facts() -> List[Dict[str, Any]]:
+    """Return all non-superseded CATEGORY_LORE facts, oldest first.
+
+    This is the corpus /ask and /test answer from. Superseded facts stay
+    excluded; that's the whole point of superseding instead of deleting a
+    retconned fact.
+    """
     client = boto3.client("dynamodb")
     response = client.query(
         TableName=_table_name(),
         IndexName="status-ingested_at-index",
         KeyConditionExpression="#status = :status",
-        ExpressionAttributeNames={"#status": "status"},
-        ExpressionAttributeValues={":status": {"S": STATUS_PENDING}},
-        ScanIndexForward=True,
-    )
-    return [_from_item(item) for item in response.get("Items", [])]
-
-
-def get_lore_facts_for_reconstruction() -> List[Dict[str, Any]]:
-    """Return all non-superseded CATEGORY_LORE facts (pending + already-
-    integrated), oldest first.
-
-    Reconstruction synthesizes from the full picture, not just what's newly
-    pending -- that's what lets it merge coherently and cross-reference
-    instead of just tacking new text onto the end of a section. Superseded
-    facts stay excluded; that's the whole point of superseding instead of
-    deleting a retconned fact.
-    """
-    client = boto3.client("dynamodb")
-    facts: List[Dict[str, Any]] = []
-    for status in (STATUS_PENDING, STATUS_INTEGRATED):
-        response = client.query(
-            TableName=_table_name(),
-            IndexName="status-ingested_at-index",
-            KeyConditionExpression="#status = :status",
-            FilterExpression="category = :category",
-            ExpressionAttributeNames={"#status": "status"},
-            ExpressionAttributeValues={
-                ":status": {"S": status},
-                ":category": {"S": CATEGORY_LORE},
-            },
-            ScanIndexForward=True,
-        )
-        facts.extend(_from_item(item) for item in response.get("Items", []))
-    return facts
-
-
-def mark_integrated(fact_id: str, doc_version: str) -> None:
-    """Mark a fact as folded into a specific canon doc rewrite."""
-    client = boto3.client("dynamodb")
-    client.update_item(
-        TableName=_table_name(),
-        Key={"fact_id": {"S": fact_id}},
-        UpdateExpression="SET #status = :status, integrated_doc_version = :v",
+        FilterExpression="category = :category",
         ExpressionAttributeNames={"#status": "status"},
         ExpressionAttributeValues={
             ":status": {"S": STATUS_INTEGRATED},
-            ":v": {"S": doc_version},
+            ":category": {"S": CATEGORY_LORE},
         },
+        ScanIndexForward=True,
     )
+    return [_from_item(item) for item in response.get("Items", [])]
 
 
 def supersede_fact(old_fact_id: str, new_fact_id: str) -> None:
     """Mark an old fact as superseded by a newer, contradicting one.
 
     The old fact is kept (not deleted) for audit history, but excluded from
-    future doc reconstructions in favor of the fact that superseded it.
+    get_lore_facts() in favor of the fact that superseded it.
     """
     client = boto3.client("dynamodb")
     client.update_item(

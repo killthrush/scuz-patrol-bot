@@ -34,6 +34,10 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 DISCORD_API_BASE = "https://discord.com/api/v10"
 DISCORD_EMBED_DESCRIPTION_LIMIT = 4096
 
+# Only these Discord usernames may submit lore -- keeps the fact store
+# curated to trusted contributors instead of open to anyone in the server.
+LORE_SUBMITTERS = {"metrivus", "killthrush", "synthypixie"}
+
 
 def _initialize_secrets() -> None:
     """Fetch secrets from Secrets Manager and set as env vars.
@@ -177,6 +181,26 @@ def _send_discord_followup(
         response.raise_for_status()
     except Exception as e:
         logger.error(f"Failed to send Discord follow-up: {e}")
+
+
+def _send_discord_channel_message(channel_id: str, content: str) -> None:
+    """Post a new message directly to a channel via the bot token.
+
+    Used for per-song mining results, which can land well after
+    /refresh-songs's original interaction token would have expired (~15min)
+    -- a large batch is rate-limited through the song queue one at a time
+    and can easily take longer than that to fully process.
+    """
+    bot_token = os.getenv("DISCORD_BOT_TOKEN")
+    url = f"{DISCORD_API_BASE}/channels/{channel_id}/messages"
+    headers = {"Authorization": f"Bot {bot_token}"}
+    try:
+        response = requests.post(
+            url, headers=headers, json={"content": content}, timeout=10
+        )
+        response.raise_for_status()
+    except Exception as e:
+        logger.error(f"Failed to send Discord channel message: {e}")
 
 
 def _self_invoke_async(source: str, payload_extra: Dict[str, Any]) -> None:
@@ -372,6 +396,7 @@ def _defer_and_process_song_refresh(parsed_event: Dict[str, Any]) -> Dict[str, A
         "discord_song_refresh_worker",
         {
             "interaction_token": parsed_event.get("interaction_token"),
+            "channel_id": parsed_event.get("channel_id"),
         },
     )
 
@@ -382,7 +407,9 @@ def _defer_and_process_song_refresh(parsed_event: Dict[str, Any]) -> Dict[str, A
     }
 
 
-def _enqueue_playlist_clips(playlist_id: str, playlist_name: str) -> int:
+def _enqueue_playlist_clips(
+    playlist_id: str, playlist_name: str, channel_id: Optional[str]
+) -> int:
     """Fetch one playlist's full clip list and enqueue each song.
 
     Playlists can include songs posted under a different Suno account than
@@ -411,7 +438,7 @@ def _enqueue_playlist_clips(playlist_id: str, playlist_name: str) -> int:
             continue
         try:
             suno_client.enqueue_song(
-                clip_id, clip.get("handle", "unknown"), clip.get("title")
+                clip_id, clip.get("handle", "unknown"), clip.get("title"), channel_id
             )
             queued += 1
         except Exception as e:
@@ -427,8 +454,12 @@ def _handle_song_refresh_worker(event: Dict[str, Any]) -> Dict[str, Any]:
     happens per-song in _process_song_queue_message, triggered by the SQS
     queue one song at a time. This keeps the interactive command fast and
     means there's no batch of work large enough to risk a timeout mid-run.
+    channel_id (if present) is threaded through to each queued song so
+    per-song mining results can be posted back as they complete -- see
+    _process_song_queue_message.
     """
     interaction_token: Optional[str] = event.get("interaction_token")
+    channel_id: Optional[str] = event.get("channel_id")
     if not interaction_token:
         logger.error("Song refresh worker invoked without interaction_token")
         return {"statusCode": 400}
@@ -442,25 +473,39 @@ def _handle_song_refresh_worker(event: Dict[str, Any]) -> Dict[str, Any]:
         )
         return {"statusCode": 200}
 
-    queued = 0
+    lines = []
+    total_queued = 0
     for handle, profile in profiles.items():
+        profile_queued = 0
         for clip in profile.get("clips", []):
             try:
-                suno_client.enqueue_song(clip["id"], handle, clip.get("title"))
-                queued += 1
+                suno_client.enqueue_song(
+                    clip["id"], handle, clip.get("title"), channel_id
+                )
+                profile_queued += 1
             except Exception as e:
                 logger.error(f"Failed to enqueue Suno clip {clip.get('id')}: {e}")
 
+        playlist_queued = 0
         for playlist in profile.get("playlists", []):
-            queued += _enqueue_playlist_clips(
-                playlist.get("id"), playlist.get("name", "unknown")
+            playlist_queued += _enqueue_playlist_clips(
+                playlist.get("id"), playlist.get("name", "unknown"), channel_id
             )
 
-    plural = "s" if queued != 1 else ""
+        total_queued += profile_queued + playlist_queued
+        line = f"• **{handle}** — {profile_queued} song(s)"
+        if playlist_queued:
+            line += f" (+{playlist_queued} via playlists)"
+        lines.append(line)
+
+    plural = "s" if total_queued != 1 else ""
     summary = (
-        f"🔄 Checked {len(profiles)} profile(s), queued {queued} song{plural} "
-        "for background lore-mining."
+        f"🔄 Checked {len(profiles)} profile(s):\n"
+        + "\n".join(lines)
+        + f"\nQueued {total_queued} song{plural} total for background lore-mining."
     )
+    if channel_id:
+        summary += " I'll post here as new facts get mined."
     _send_discord_followup(interaction_token, summary)
     return {"statusCode": 200}
 
@@ -601,7 +646,7 @@ def _handle_ask_worker(event: Dict[str, Any]) -> Dict[str, Any]:
     return {"statusCode": 200}
 
 
-def _put_candidate_fact(candidate: Dict[str, Any], section: str) -> None:
+def _put_candidate_fact(candidate: Dict[str, Any], section: str) -> bool:
     try:
         fact_store.put_fact(
             content=candidate["content"],
@@ -612,15 +657,17 @@ def _put_candidate_fact(candidate: Dict[str, Any], section: str) -> None:
             category=candidate["category"],
             title=candidate.get("title"),
         )
+        return True
     except ValueError as e:
         logger.warning(f"Skipping oversized {candidate['source']} fact: {e}")
+        return False
 
 
 def _write_candidate(
     candidate: Dict[str, Any],
     clip_id: str,
     claude: Optional[ClaudeClient],
-) -> None:
+) -> bool:
     """Classify (if needed) and record one mined candidate as a fact.
 
     Lyrics/credit candidates never need classification -- they're recorded
@@ -630,6 +677,9 @@ def _write_candidate(
     Claude is only asked "which section?" (suggest_section), never whether
     the content counts as lore at all. Everything else goes through the
     normal lore/question/neither gate.
+
+    Returns whether a fact was actually written, so the caller can report
+    how many new facts a song's mining pass produced.
     """
     if candidate["category"] != fact_store.CATEGORY_LORE:
         section = (
@@ -637,8 +687,7 @@ def _write_candidate(
             if candidate["category"] == fact_store.CATEGORY_LYRICS
             else "Credits"
         )
-        _put_candidate_fact(candidate, section)
-        return
+        return _put_candidate_fact(candidate, section)
 
     if candidate.get("always_canon"):
         section = "Unexplored Ideas"
@@ -650,34 +699,37 @@ def _write_candidate(
                     f"Failed to get section suggestion for {candidate['source']} "
                     f"candidate for song {clip_id}: {e}"
                 )
-        _put_candidate_fact(candidate, section)
-        return
+        return _put_candidate_fact(candidate, section)
 
     if claude is None:
-        return
+        return False
     try:
         classification = claude.classify_intent(candidate["content"])
     except Exception as e:
         logger.error(
             f"Failed to classify {candidate['source']} candidate for song {clip_id}: {e}"
         )
-        return
+        return False
 
     if classification.get("intent") != "new_lore":
-        return
+        return False
 
     section = str(classification.get("suggested_section", "Unexplored Ideas"))
-    _put_candidate_fact(candidate, section)
+    return _put_candidate_fact(candidate, section)
 
 
 def _process_song_queue_message(message: Dict[str, Any]) -> None:
     """Mine one song's comments/caption/lyrics for new lore and record any as facts.
 
-    No Discord feedback here -- SQS messages aren't tied to a live interaction,
-    and the caller (a human running /refresh-songs) already got an immediate
-    "queued" reply. Facts land straight in the fact store with no confirm step.
+    Facts land straight in the fact store with no confirm step. If a
+    channel_id came through with this message (see enqueue_song) and any
+    facts were actually written, posts a result message there -- there's no
+    interaction to follow up on since SQS messages aren't tied to one, and
+    the original /refresh-songs interaction token may well have already
+    expired by the time this particular song's turn comes up in the queue.
     """
     clip_id = message["clip_id"]
+    channel_id = message.get("channel_id")
 
     clip = suno_client.fetch_clip(clip_id)
     comments = suno_client.fetch_comments(clip_id)
@@ -691,10 +743,20 @@ def _process_song_queue_message(message: Dict[str, Any]) -> None:
         except Exception as e:
             logger.error(f"Failed to init Claude client for song {clip_id}: {e}")
 
-    for candidate in candidates:
-        _write_candidate(candidate, clip_id, claude)
+    written = sum(
+        1 for candidate in candidates if _write_candidate(candidate, clip_id, claude)
+    )
 
     suno_client.save_song_artifact(clip_id, updated_artifact)
+
+    if written and channel_id:
+        title = message.get("title") or clip_id
+        handle = message.get("handle", "unknown")
+        plural = "s" if written != 1 else ""
+        _send_discord_channel_message(
+            channel_id,
+            f"🎵 **{title}** (via {handle}) — {written} new fact{plural} mined.",
+        )
 
 
 def _handle_sqs_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -800,6 +862,23 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return _defer_extracting_message(parsed_event, _defer_and_process_ask)
 
         if parsed_event.get("command_name") == "lore":
+            user_name = (parsed_event.get("user_name") or "").lower()
+            if user_name not in LORE_SUBMITTERS:
+                logger.warning(
+                    f"Rejected /lore submission from unauthorized user: {user_name}"
+                )
+                return {
+                    "statusCode": 200,
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps(
+                        {
+                            "type": 4,  # CHANNEL_MESSAGE_WITH_SOURCE
+                            "data": {
+                                "content": "⚠️ Only certain contributors can submit lore directly."
+                            },
+                        }
+                    ),
+                }
             return _defer_extracting_message(
                 parsed_event, _defer_and_process_lore_intake
             )

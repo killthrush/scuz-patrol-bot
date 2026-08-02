@@ -109,6 +109,52 @@ class TestHandlerDeferredResponse:
         assert "error" in body
 
 
+class TestLoreAuthorization:
+    """Only LORE_SUBMITTERS may submit lore -- everyone else gets an
+    immediate rejection, not a deferred prompt."""
+
+    def test_allowed_submitter_gets_deferred(self, mock_clients, monkeypatch):
+        monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "scuz-patrol-bot-dev")
+        event = command_event(
+            "lore", "content", "Kilgore joined in 2020", user_name="metrivus"
+        )
+
+        with patch("src.handler.boto3.client") as mock_boto_client:
+            mock_boto_client.return_value = Mock()
+            response = lambda_handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["type"] == 5  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+
+    def test_allowed_submitter_is_case_insensitive(self, mock_clients, monkeypatch):
+        monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "scuz-patrol-bot-dev")
+        event = command_event(
+            "lore", "content", "Kilgore joined in 2020", user_name="Synthypixie"
+        )
+
+        with patch("src.handler.boto3.client") as mock_boto_client:
+            mock_boto_client.return_value = Mock()
+            response = lambda_handler(event, None)
+
+        body = json.loads(response["body"])
+        assert body["type"] == 5
+
+    def test_unauthorized_submitter_is_rejected_immediately(self, mock_clients):
+        event = command_event(
+            "lore", "content", "Kilgore joined in 2020", user_name="random_fan"
+        )
+
+        with patch("src.handler.boto3.client") as mock_boto_client:
+            response = lambda_handler(event, None)
+
+        assert not mock_boto_client.called  # no self-invoke, nothing deferred
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["type"] == 4  # CHANNEL_MESSAGE_WITH_SOURCE (immediate)
+        assert "Only certain contributors" in body["data"]["content"]
+
+
 class TestLoreIntakeWorker:
     """Test the async worker that builds /lore's confirm/discard prompt.
 
@@ -429,7 +475,7 @@ class TestLoreWorker:
         assert not mock_patch.called
 
 
-def refresh_songs_event() -> dict:
+def refresh_songs_event(channel_id: str = "channel_456") -> dict:
     """Build a Discord APPLICATION_COMMAND event for /refresh-songs (no options)."""
     return {
         "headers": {},
@@ -437,6 +483,7 @@ def refresh_songs_event() -> dict:
             {
                 "type": 2,
                 "token": "interaction_token_abc",
+                "channel_id": channel_id,
                 "data": {"name": "refresh-songs", "options": []},
             }
         ),
@@ -462,6 +509,7 @@ class TestSongRefreshDeferred:
         payload = json.loads(mock_lambda_client.invoke.call_args.kwargs["Payload"])
         assert payload["source"] == "discord_song_refresh_worker"
         assert payload["interaction_token"] == "interaction_token_abc"
+        assert payload["channel_id"] == "channel_456"
 
 
 class TestSongRefreshWorker:
@@ -495,11 +543,38 @@ class TestSongRefreshWorker:
 
         assert response["statusCode"] == 200
         assert mock_enqueue.call_count == 3
-        mock_enqueue.assert_any_call("clip1", "scuz_patrol", "Incarcerator")
-        mock_enqueue.assert_any_call("clip3", "alfredokilgore", "Solo Cut")
+        mock_enqueue.assert_any_call("clip1", "scuz_patrol", "Incarcerator", None)
+        mock_enqueue.assert_any_call("clip3", "alfredokilgore", "Solo Cut", None)
         summary = mock_patch.call_args.kwargs["json"]["content"]
         assert "2 profile" in summary
-        assert "queued 3 song" in summary
+        assert "queued 3 song" in summary.lower()
+        assert "scuz_patrol" in summary and "2 song" in summary
+        assert "alfredokilgore" in summary and "1 song" in summary
+
+    def test_threads_channel_id_to_enqueued_songs(self, mock_clients):
+        """channel_id lets the per-song worker post mining results back once
+        it's done, well after this interaction's own token may have expired."""
+        profiles = {
+            "scuz_patrol": {"clips": [{"id": "clip1", "title": "Incarcerator"}]}
+        }
+
+        with patch(
+            "src.handler.suno_client.fetch_profiles_parallel", return_value=profiles
+        ), patch("src.handler.suno_client.enqueue_song") as mock_enqueue, patch(
+            "src.handler.requests.patch"
+        ):
+            lambda_handler(
+                {
+                    "source": "discord_song_refresh_worker",
+                    "interaction_token": "tok",
+                    "channel_id": "channel_456",
+                },
+                None,
+            )
+
+        mock_enqueue.assert_called_once_with(
+            "clip1", "scuz_patrol", "Incarcerator", "channel_456"
+        )
 
     def test_enqueues_songs_from_playlists_too(self, mock_clients):
         """A playlist can include songs posted under a different account
@@ -548,11 +623,12 @@ class TestSongRefreshWorker:
 
         assert response["statusCode"] == 200
         assert mock_enqueue.call_count == 3
-        mock_enqueue.assert_any_call("clip1", "scuz_patrol", "Incarcerator")
-        mock_enqueue.assert_any_call("clip2", "metrivus", "Fiend Like Me")
-        mock_enqueue.assert_any_call("clip3", "lubonit84", "Still Here?")
+        mock_enqueue.assert_any_call("clip1", "scuz_patrol", "Incarcerator", None)
+        mock_enqueue.assert_any_call("clip2", "metrivus", "Fiend Like Me", None)
+        mock_enqueue.assert_any_call("clip3", "lubonit84", "Still Here?", None)
         summary = mock_patch.call_args.kwargs["json"]["content"]
-        assert "queued 3 song" in summary
+        assert "queued 3 song" in summary.lower()
+        assert "+2 via playlists" in summary
 
     def test_playlist_fetch_failure_does_not_block_other_playlists(self, mock_clients):
         profiles = {
@@ -585,9 +661,9 @@ class TestSongRefreshWorker:
             )
 
         assert response["statusCode"] == 200
-        mock_enqueue.assert_called_once_with("clip9", "metrivus", None)
+        mock_enqueue.assert_called_once_with("clip9", "metrivus", None, None)
         summary = mock_patch.call_args.kwargs["json"]["content"]
-        assert "queued 1 song" in summary
+        assert "queued 1 song" in summary.lower()
 
     def test_one_enqueue_failure_does_not_block_others(self, mock_clients):
         profiles = {
@@ -614,7 +690,7 @@ class TestSongRefreshWorker:
 
         assert response["statusCode"] == 200
         summary = mock_patch.call_args.kwargs["json"]["content"]
-        assert "queued 1 song" in summary
+        assert "queued 1 song" in summary.lower()
 
     def test_profile_fetch_failure_sends_error_summary(self, mock_clients):
         with patch(
@@ -646,8 +722,9 @@ def sqs_event(*bodies: dict) -> dict:
 class TestSongQueueWorker:
     """Test the SQS-triggered worker that mines one song at a time for new facts.
 
-    No Discord feedback here -- the queue worker only ever writes to the fact
-    store (or skips), since SQS messages aren't tied to a live interaction.
+    Posts a channel message (not an interaction follow-up, since SQS
+    messages aren't tied to a live interaction) when a song's mining pass
+    actually writes any facts -- see TestSongQueueWorkerChannelNotification.
     """
 
     def _clip(self, **overrides):
@@ -962,6 +1039,115 @@ class TestSongQueueWorker:
         assert response["statusCode"] == 200
         assert mock_save_artifact.call_count == 2
         assert mock_put_fact.call_count == 2
+
+
+class TestSongQueueWorkerChannelNotification:
+    """channel_id (threaded through from /refresh-songs) triggers a direct
+    channel post reporting how many facts a song's mining pass wrote --
+    posted via the bot token, not an interaction follow-up, since a song's
+    turn in the FIFO queue can come up well after the original interaction
+    token would have expired."""
+
+    def _clip(self, **overrides):
+        clip = {
+            "id": "clip1",
+            "title": "Incarcerator",
+            "handle": "scuz_patrol",
+            "comment_count": 0,
+            "caption": "Wrote this after the breakup",
+            "metadata": {},
+        }
+        clip.update(overrides)
+        return clip
+
+    def test_posts_channel_message_when_facts_are_written(self, mock_clients):
+        mock_clients["claude"].suggest_section.return_value = "Band Chronology"
+
+        with patch(
+            "src.handler.suno_client.fetch_clip", return_value=self._clip()
+        ), patch(
+            "src.handler.suno_client.fetch_comments", return_value={"results": []}
+        ), patch(
+            "src.handler.suno_client.load_song_artifact", return_value={}
+        ), patch(
+            "src.handler.suno_client.save_song_artifact"
+        ), patch(
+            "src.handler.fact_store.put_fact"
+        ), patch(
+            "src.handler.requests.post"
+        ) as mock_post:
+            response = lambda_handler(
+                sqs_event(
+                    {
+                        "clip_id": "clip1",
+                        "handle": "scuz_patrol",
+                        "title": "Incarcerator",
+                        "channel_id": "channel_456",
+                    }
+                ),
+                None,
+            )
+
+        assert response["statusCode"] == 200
+        mock_post.assert_called_once()
+        call_args = mock_post.call_args
+        assert (
+            call_args.args[0]
+            == "https://discord.com/api/v10/channels/channel_456/messages"
+        )
+        assert "Incarcerator" in call_args.kwargs["json"]["content"]
+        assert "1 new fact" in call_args.kwargs["json"]["content"]
+
+    def test_no_channel_message_when_no_channel_id(self, mock_clients):
+        """Old queued messages (from before this feature) have no channel_id
+        -- silently skip notification instead of erroring."""
+        mock_clients["claude"].suggest_section.return_value = "Band Chronology"
+
+        with patch(
+            "src.handler.suno_client.fetch_clip", return_value=self._clip()
+        ), patch(
+            "src.handler.suno_client.fetch_comments", return_value={"results": []}
+        ), patch(
+            "src.handler.suno_client.load_song_artifact", return_value={}
+        ), patch(
+            "src.handler.suno_client.save_song_artifact"
+        ), patch(
+            "src.handler.fact_store.put_fact"
+        ), patch(
+            "src.handler.requests.post"
+        ) as mock_post:
+            lambda_handler(
+                sqs_event({"clip_id": "clip1", "handle": "scuz_patrol"}), None
+            )
+
+        assert not mock_post.called
+
+    def test_no_channel_message_when_no_facts_written(self, mock_clients):
+        """A song that yields nothing new shouldn't spam the channel."""
+        with patch(
+            "src.handler.suno_client.fetch_clip",
+            return_value=self._clip(caption=None),
+        ), patch(
+            "src.handler.suno_client.fetch_comments", return_value={"results": []}
+        ), patch(
+            "src.handler.suno_client.load_song_artifact", return_value={}
+        ), patch(
+            "src.handler.suno_client.save_song_artifact"
+        ), patch(
+            "src.handler.requests.post"
+        ) as mock_post:
+            lambda_handler(
+                sqs_event(
+                    {
+                        "clip_id": "clip1",
+                        "handle": "scuz_patrol",
+                        "channel_id": "channel_456",
+                    }
+                ),
+                None,
+            )
+
+        assert not mock_post.called
 
 
 def calibration_command_event() -> dict:

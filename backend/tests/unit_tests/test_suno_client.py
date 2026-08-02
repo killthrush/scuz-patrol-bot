@@ -623,7 +623,20 @@ class TestEnqueueSong:
             "clip_id": "clip1",
             "handle": "scuz_patrol",
             "title": "Incarcerator",
+            "channel_id": None,
         }
+
+    def test_includes_channel_id_when_given(self, monkeypatch):
+        monkeypatch.setenv("SONG_QUEUE_URL", "https://sqs.example/test-queue.fifo")
+        mock_sqs = Mock()
+
+        with patch("src.suno_client.boto3.client", return_value=mock_sqs):
+            suno_client.enqueue_song(
+                "clip1", "scuz_patrol", "Incarcerator", channel_id="channel_456"
+            )
+
+        body = json.loads(mock_sqs.send_message.call_args.kwargs["MessageBody"])
+        assert body["channel_id"] == "channel_456"
 
     def test_raises_without_song_queue_url(self, monkeypatch):
         monkeypatch.delenv("SONG_QUEUE_URL", raising=False)

@@ -386,12 +386,19 @@ def mine_song_facts(
     return candidates, updated_artifact
 
 
-def enqueue_song(clip_id: str, handle: str, title: Optional[str]) -> None:
+def enqueue_song(
+    clip_id: str, handle: str, title: Optional[str], channel_id: Optional[str] = None
+) -> None:
     """Enqueue one song for background ingest processing via the SQS song queue.
 
     All messages share one MessageGroupId so the FIFO queue processes songs
     strictly one at a time. MessageDeduplicationId is the clip_id so running
     /refresh-songs twice in quick succession doesn't double-queue the same song.
+
+    channel_id (if given) lets the per-song worker post mining results back
+    to the channel /refresh-songs was run in, once this song is processed --
+    that can be well after the original interaction token would have expired,
+    since a large batch is rate-limited through the queue one song at a time.
     """
     queue_url = os.getenv("SONG_QUEUE_URL")
     if not queue_url:
@@ -400,7 +407,14 @@ def enqueue_song(clip_id: str, handle: str, title: Optional[str]) -> None:
     sqs = boto3.client("sqs")
     sqs.send_message(
         QueueUrl=queue_url,
-        MessageBody=json.dumps({"clip_id": clip_id, "handle": handle, "title": title}),
+        MessageBody=json.dumps(
+            {
+                "clip_id": clip_id,
+                "handle": handle,
+                "title": title,
+                "channel_id": channel_id,
+            }
+        ),
         MessageGroupId="songs",
         MessageDeduplicationId=clip_id,
     )
